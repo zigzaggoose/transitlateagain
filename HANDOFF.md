@@ -29,16 +29,11 @@ test-integration` (0 skips), `make cross`, `npm run build`, and
 needs the flag). Exercised end to end locally against a copy of the dev
 database with 1.7M synthetic visits; the dev database itself was not touched.
 
-**Deploying it** (after `git push`): `git pull && $C up -d --build` on the VM,
-as usual. Startup applies 0007 and 0008 before the pollers start; 0007 fills
-`trip_services` from the stored timetables, ~9 s locally with nine versions,
-so expect a pause in ingest of that order. Then, beside the running service:
-
-```sh
-$C exec -T postgres psql -U headway -v ON_ERROR_STOP=1 < deploy/backfill-stop-visits.sql
-```
-
-which gives the service pages the last `RETENTION_DAYS` of history at once.
+**Deploying it**: `sh deploy/release.sh` from the laptop, at the repo root. It
+pulls and rebuilds on the VM, waits for the admin port (migrations finish
+first; 0007 fills `trip_services` from the stored timetables, ~9 s locally, so
+ingest pauses about that long), runs `deploy/backfill-stop-visits.sql` beside
+the live service, and prints the storage figures for "Due next" 1.
 
 **`deploy/Untitled-1.yaml` holds a live Grafana token** and is untracked but
 not ignored. Delete it; rotate the token if it went anywhere else.
