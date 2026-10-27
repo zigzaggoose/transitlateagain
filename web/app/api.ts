@@ -100,7 +100,7 @@ export type Station = { stop_id: string; name: string; feed_id: string };
 
 export type DayType = "weekday" | "saturday" | "sunday";
 
-export type ServiceDay = { service_date: string; delay_s: number | null; status: Status };
+export type ServiceDay = { service_date: string; delay_s: number | null; status: Status; alert_ids?: string[] };
 
 // One scheduled service from the From station to the To station: "the 07:42".
 export type Service = {
@@ -121,6 +121,7 @@ export type Service = {
   n_cancelled: number;
   n_skipped: number;
   n_unknown: number;
+  n_alert_days: number;
   typical_delay_s: number | null;
   days: ServiceDay[];
 };
@@ -132,4 +133,6 @@ export type Services = {
   first_day: string;
   last_day: string;
   services: Service[];
+  // TfNSW's published alerts that covered a day above, by id.
+  alerts: Record<string, { header: string; url?: string }>;
 };

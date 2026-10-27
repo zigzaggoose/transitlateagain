@@ -20,6 +20,7 @@ const service = (n: Partial<Service>): Service => ({
   n_cancelled: 0,
   n_skipped: 0,
   n_unknown: 0,
+  n_alert_days: 0,
   typical_delay_s: null,
   days: [],
   ...n,

@@ -57,6 +57,15 @@ type servicesResponse struct {
 	LastDay  string       `json:"last_day"`
 	Services []serviceRow `json:"services"`
 	Count    int          `json:"count"`
+	// Alerts is every alert a day below names, by id: TfNSW's own words on
+	// what was disrupted. Days carry ids so one alert is not repeated across
+	// the twenty services it touched.
+	Alerts map[string]alertText `json:"alerts"`
+}
+
+type alertText struct {
+	Header string `json:"header"`
+	URL    string `json:"url,omitempty"`
 }
 
 type serviceRow struct {
@@ -80,6 +89,8 @@ type serviceRow struct {
 	NCancelled int `json:"n_cancelled"`
 	NSkipped   int `json:"n_skipped"`
 	NUnknown   int `json:"n_unknown"`
+	// NAlertDays is how many of the days had a published alert covering the run.
+	NAlertDays int `json:"n_alert_days"`
 	// TypicalDelayS is the median arrival delay at to over the days that
 	// have one, the lower middle value as the rollups' percentile_disc.
 	TypicalDelayS *int32 `json:"typical_delay_s"`
@@ -88,9 +99,10 @@ type serviceRow struct {
 }
 
 type serviceDay struct {
-	ServiceDate string `json:"service_date"`
-	DelayS      *int32 `json:"delay_s"`
-	Status      string `json:"status"`
+	ServiceDate string   `json:"service_date"`
+	DelayS      *int32   `json:"delay_s"`
+	Status      string   `json:"status"`
+	AlertIDs    []string `json:"alert_ids,omitempty"`
 }
 
 // dayTypes are ISO weekdays, as Postgres's isodow numbers them.
@@ -151,7 +163,7 @@ func (s *server) services(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), handlerTimeout)
 	defer cancel()
-	svcs, err := s.Services(ctx, q)
+	svcs, alerts, err := s.Services(ctx, q)
 	if err != nil {
 		s.Log.Error("services query failed", "component", "api", "request_id", requestID(r.Context()), "err", err.Error())
 		writeError(w, r, http.StatusInternalServerError, "internal", "internal error")
@@ -165,6 +177,10 @@ func (s *server) services(w http.ResponseWriter, r *http.Request) {
 		FirstDay: first.Format(time.DateOnly),
 		LastDay:  last.Format(time.DateOnly),
 		Services: make([]serviceRow, 0, len(svcs)),
+		Alerts:   make(map[string]alertText, len(alerts)),
+	}
+	for id, a := range alerts {
+		resp.Alerts[id] = alertText{Header: a.Header, URL: a.URL}
 	}
 	for _, sv := range svcs {
 		resp.Services = append(resp.Services, s.serviceRow(t, sv))
@@ -217,7 +233,10 @@ func (s *server) serviceRow(t timetable, sv store.Service) serviceRow {
 		if d.DelayS != nil && st != "cancelled" && st != "skipped" {
 			delays = append(delays, *d.DelayS)
 		}
-		row.Days = append(row.Days, serviceDay{ServiceDate: d.ServiceDate.Format(time.DateOnly), DelayS: d.DelayS, Status: st})
+		if len(d.AlertIDs) > 0 {
+			row.NAlertDays++
+		}
+		row.Days = append(row.Days, serviceDay{ServiceDate: d.ServiceDate.Format(time.DateOnly), DelayS: d.DelayS, Status: st, AlertIDs: d.AlertIDs})
 	}
 	if len(delays) > 0 {
 		slices.Sort(delays)

@@ -1,10 +1,47 @@
 # HANDOFF.md
 
-Session state as of **2026-09-24, evening**, commit `5e9d4c1` (pushed, CI green,
-running on the VM). Rewrite this file when it stops being true. Permanent rules
-live in `CLAUDE.md`; design in `PROJECT.md` (§12 milestones, §15 decisions,
-§16 open questions). Every deployment step ever run is in
-`deploy/vm-bootstrap.md`.
+Session state as of **2026-10-27, evening**. This session's work is three commits on
+`main` after `5af5f5b`, one per step below, **not yet pushed or deployed**. Rewrite this
+file when it stops being true. Permanent rules live in `CLAUDE.md`; design in
+`PROJECT.md` (§12 milestones, §15 decisions, §16 open questions). Every
+deployment step ever run is in `deploy/vm-bootstrap.md`.
+
+## This session: service report cards (committed, not deployed)
+
+Five steps the user asked for, from a review of how to make the site worth
+visiting. §15 has a row for each, dated 2026-10-27.
+
+1. **Storage over a full day** — *not done*: reads on the VM were not
+   permitted from this session. Run the queries in "Due next" below.
+2. **Trip id stability** — measured on the two stored train bundles: 92 % of
+   trip ids carry over a day, 99.9 % of service keys do. Hence (3).
+3. `migrations/0007`: `trip_services` (trip id → service key, filled by the
+   loader) and `stop_visits` (each visit's final word, written by the rollup,
+   monthly partitions, `VISIT_RETENTION_DAYS=180`).
+4. `GET /v1/stations`, `GET /v1/services`, and the `/services` page: a grade
+   and a square a day for every direct train between two stations.
+5. `migrations/0008` + an alerts poller (`ALERTS_URL`, 5 min): TfNSW's service
+   alerts, shown on the days they covered.
+
+All checks green on 2026-10-27: `make lint`, `make test`, `make
+test-integration` (0 skips), `make cross`, `npm run build`, and
+`node --experimental-strip-types --test app/*.test.ts` in `web/` (Node 22
+needs the flag). Exercised end to end locally against a copy of the dev
+database with 1.7M synthetic visits; the dev database itself was not touched.
+
+**Deploying it** (after `git push`): `git pull && $C up -d --build` on the VM,
+as usual. Startup applies 0007 and 0008 before the pollers start; 0007 fills
+`trip_services` from the stored timetables, ~9 s locally with nine versions,
+so expect a pause in ingest of that order. Then, beside the running service:
+
+```sh
+$C exec -T postgres psql -U headway -v ON_ERROR_STOP=1 < deploy/backfill-stop-visits.sql
+```
+
+which gives the service pages the last `RETENTION_DAYS` of history at once.
+
+**`deploy/Untitled-1.yaml` holds a live Grafana token** and is untracked but
+not ignored. Delete it; rotate the token if it went anywhere else.
 
 ## Start here
 
@@ -78,21 +115,28 @@ either means editing both `.env` files, then `$C up -d` on the VM.
 
 ## Due next
 
-1. **Storage over a full day, the last unticked box in the plan.** The first
-   complete service day is `observations_2026_09_25`: complete early on
-   2026-09-26, its last hour rolled up ~3 h later, so measure on the
-   **afternoon of 2026-09-26** with the SQL at the end of `docs/storage.md`
-   (`ssh root@119.42.55.16`, then `cd /opt/transitlateagain && $C exec postgres psql -U headway`).
+1. **Storage over a full day, the last unticked box in the plan**, now a
+   month overdue and also what sizes `VISIT_RETENTION_DAYS` (§16 q13). On the
+   VM (`cd /opt/transitlateagain && $C exec postgres psql -U headway`):
+   ```sql
+   SELECT c.relname, pg_size_pretty(pg_total_relation_size(c.oid)), c.reltuples::bigint
+   FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+   WHERE i.inhparent = 'observations'::regclass ORDER BY 1;
+   SELECT pg_size_pretty(pg_total_relation_size('otp_stop_hourly') + pg_total_relation_size('otp_route_hourly'));
+   SELECT pg_size_pretty(pg_database_size(current_database()));
+   ```
    Fill in `docs/storage.md` and the two "baseline TBD" rows of §13, and tick
-   the Stage 3 box.
-2. **§13 freshness p50** is unmeasured, and the p95 (17.7 s) is a six-minute
-   first window. The dashboard's freshness panel over a full day gives both;
-   record them with the date.
-3. **The `DOCKER-USER` allowlist** in `deploy/firewall.sh` is Cloudflare's IPv4
+   the Stage 3 box. After a month of the new tables, measure `stop_visits`,
+   `trip_services` and `service_alerts` too (§16 q13, q14).
+2. **Ride-check the numbers**: take two or three trains you know, and compare
+   what `/services` says about those days with what happened.
+3. **§13 freshness p50** is unmeasured, and the p95 (17.7 s) is a six-minute
+   first window. The dashboard's freshness panel over a full day gives both.
+4. **The `DOCKER-USER` allowlist** in `deploy/firewall.sh` is Cloudflare's IPv4
    ranges as of 2026-09-24. If Cloudflare changes them
    (https://www.cloudflare.com/ips-v4), update the list and rerun the script.
 
-## Found and fixed this session
+## Found and fixed on 2026-09-24
 
 - **§9.1 case 18:** the producers keep finished trips and served stops, so
   `/now` called 21 % of trips active with a next stop hours past. The cache

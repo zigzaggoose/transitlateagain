@@ -202,7 +202,7 @@ export default function ServicesPage() {
             <>
               <ul className="services">
                 {later.slice(0, shown).map((s) => (
-                  <ServiceCard key={serviceKey(s)} s={s} from={from} days={plural} />
+                  <ServiceCard key={serviceKey(s)} s={s} from={from} days={plural} alerts={result.alerts} />
                 ))}
               </ul>
               {later.length > shown && (
@@ -236,9 +236,12 @@ export default function ServicesPage() {
 // cards different trains.
 const serviceKey = (s: Service) => [s.feed_id, s.route_id, s.direction_id, s.origin.stop_id, s.origin_departs].join(" ");
 
-function ServiceCard({ s, from, days }: { s: Service; from: string; days: string }) {
+function ServiceCard({ s, from, days, alerts }: { s: Service; from: string; days: string; alerts: Services["alerts"] }) {
   const g = grade(s);
   const via = s.origin.stop_id !== from && s.origin.name ? ` from ${s.origin.name}` : "";
+  const named = [...new Set(s.days.flatMap((d) => d.alert_ids ?? []))].filter((id) => alerts[id]);
+  const alertText = (d: Service["days"][number]) =>
+    (d.alert_ids ?? []).map((id) => alerts[id]?.header).filter(Boolean).join("; ");
   return (
     <li className="service">
       <div className={`grade ${g ? "g-" + g : "none"}`} aria-label={g ? `Grade ${g}` : "Not graded yet"}>
@@ -259,14 +262,29 @@ function ServiceCard({ s, from, days }: { s: Service; from: string; days: string
           {s.typical_delay_s !== null && `, ${typical(s.typical_delay_s)}`}.
         </p>
         <ol className="days" aria-label="Each day, oldest first">
-          {s.days.map((d) => (
-            <li key={d.service_date} className={d.status} title={`${dayLabel(d.service_date)}: ${dayText(d)}`}>
-              <span className="sr">
-                {dayLabel(d.service_date)}: {dayText(d)}
-              </span>
-            </li>
-          ))}
+          {s.days.map((d) => {
+            const note = alertText(d);
+            const text = `${dayLabel(d.service_date)}: ${dayText(d)}${note ? ` — TfNSW alert: ${note}` : ""}`;
+            return (
+              <li key={d.service_date} className={note ? `${d.status} alerted` : d.status} title={text}>
+                <span className="sr">{text}</span>
+              </li>
+            );
+          })}
         </ol>
+        {named.length > 0 && (
+          <p className="small muted alerts">
+            TfNSW published a disruption on {s.n_alert_days} of these days
+            {" "}(outlined):{" "}
+            {named.slice(0, 2).map((id, i) => (
+              <span key={id}>
+                {i > 0 && "; "}
+                {alerts[id].url ? <a href={alerts[id].url}>{alerts[id].header}</a> : alerts[id].header}
+              </span>
+            ))}
+            {named.length > 2 && ` and ${named.length - 2} more`}.
+          </p>
+        )}
       </div>
     </li>
   );

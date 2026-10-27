@@ -73,15 +73,32 @@ type ServiceDay struct {
 	DelayS      *int32
 	TripRel     int32
 	StopTimeRel int32
+	// AlertIDs are the published alerts that covered this run (service_alerts):
+	// on its route or trip, with a period of at most a week that holds its
+	// scheduled arrival. Nil when none did.
+	AlertIDs []string
 }
+
+// AlertText is what the site shows of an alert.
+type AlertText struct {
+	Header string
+	URL    string // "" when the alert has none
+}
+
+// alertMaxPeriod is the longest active period that marks a day. TfNSW leaves
+// some alerts open for months or years (a trip's "Running late" since
+// February, a stop closure since 2022, measured 2026-10-27); counted, they
+// would mark every day of a route. Its trackwork comes as nightly periods.
+const alertMaxPeriod = "7 days"
 
 // Services returns, in order of scheduled departure, every service among the
 // legs' trips that has at least one visit at the destination in the query's
-// dates. A service with none is not running on those days of the week, or
-// has no history yet; either way there is nothing to report.
-func (s *Store) Services(ctx context.Context, q ServiceQuery) ([]Service, error) {
+// dates, and the text of every alert their days name. A service with no
+// visit is not running on those days of the week, or has no history yet;
+// either way there is nothing to report.
+func (s *Store) Services(ctx context.Context, q ServiceQuery) ([]Service, map[string]AlertText, error) {
 	if len(q.Legs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	feeds := make([]string, len(q.Legs))
 	trips := make([]string, len(q.Legs))
@@ -102,7 +119,16 @@ func (s *Store) Services(ctx context.Context, q ServiceQuery) ([]Service, error)
 	// Hornsby to Central (stop_times heap reads of every call at Central's
 	// platforms, 48,668 rows) against a few in Go over memory it already has.
 	rows, err := s.pool.Query(ctx, `
-		WITH legs AS (
+		WITH alerts AS MATERIALIZED (
+			-- The periods that can mark a day in range, each alert's apart:
+			-- bounded, at most alertMaxPeriod, overlapping the range widened
+			-- by the 48 h a service day's times can run past its date.
+			SELECT a.alert_id, a.route_ids, a.trip_ids, r AS period
+			FROM service_alerts a, unnest(a.active) r
+			WHERE a.active && tstzmultirange(tstzrange($5::timestamptz - interval '1 day', $6::timestamptz + interval '3 days'))
+			  AND NOT lower_inf(r) AND NOT upper_inf(r) AND upper(r) - lower(r) <= interval '`+alertMaxPeriod+`'
+		),
+		legs AS (
 			SELECT * FROM unnest($1::text[], $2::text[], $3::int[], $4::int[]) AS l(feed_id, trip_id, depart_s, arrive_s)
 		),
 		services AS (
@@ -112,13 +138,15 @@ func (s *Store) Services(ctx context.Context, q ServiceQuery) ([]Service, error)
 			GROUP BY 1, 2, 3, 4, 5
 		)
 		SELECT s.feed_id, s.route_id, s.direction_id, s.origin_stop_id, s.origin_dep_s, s.headsign,
-		       s.depart_s, s.arrive_s, d.service_date, d.observed_delay_s, d.trip_rel, d.stop_time_rel
+		       s.depart_s, s.arrive_s, d.service_date, d.observed_delay_s, d.trip_rel, d.stop_time_rel,
+		       (SELECT array_agg(DISTINCT a.alert_id) FROM alerts a
+		        WHERE a.period @> d.scheduled_at AND (s.route_id = ANY(a.route_ids) OR d.trip_id = ANY(a.trip_ids)))
 		FROM services s
 		CROSS JOIN LATERAL (
 			-- A service runs once a day; should two of its trip ids both
 			-- report one day, the first is kept rather than counting it twice.
 			SELECT DISTINCT ON (sv.service_date)
-			       sv.service_date, sv.observed_delay_s, sv.trip_rel, sv.stop_time_rel
+			       sv.service_date, sv.observed_delay_s, sv.trip_rel, sv.stop_time_rel, sv.scheduled_at, t.trip_id
 			FROM trip_services t
 			JOIN stop_visits sv ON sv.feed_id = t.feed_id AND sv.trip_id = t.trip_id
 			WHERE t.feed_id = s.feed_id AND t.route_id = s.route_id AND t.direction_id = s.direction_id
@@ -131,14 +159,14 @@ func (s *Store) Services(ctx context.Context, q ServiceQuery) ([]Service, error)
 		ORDER BY s.depart_s, s.feed_id, s.route_id, s.direction_id, s.origin_stop_id, s.origin_dep_s, d.service_date`,
 		feeds, trips, departs, arrives, q.FirstDay, q.LastDay, q.Weekdays, q.ToStops)
 	if err != nil {
-		return nil, fmt.Errorf("services for %d legs: %w", len(q.Legs), err)
+		return nil, nil, fmt.Errorf("services for %d legs: %w", len(q.Legs), err)
 	}
 	var out []Service
 	var sv Service
 	var day ServiceDay
 	_, err = pgx.ForEachRow(rows, []any{
 		&sv.FeedID, &sv.RouteID, &sv.DirectionID, &sv.OriginStopID, &sv.OriginDepS, &sv.Headsign,
-		&sv.DepartS, &sv.ArriveS, &day.ServiceDate, &day.DelayS, &day.TripRel, &day.StopTimeRel,
+		&sv.DepartS, &sv.ArriveS, &day.ServiceDate, &day.DelayS, &day.TripRel, &day.StopTimeRel, &day.AlertIDs,
 	}, func() error {
 		if n := len(out); n == 0 || !out[n-1].same(sv) {
 			sv.Days = nil
@@ -149,9 +177,32 @@ func (s *Store) Services(ctx context.Context, q ServiceQuery) ([]Service, error)
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("services for %d legs: %w", len(q.Legs), err)
+		return nil, nil, fmt.Errorf("services for %d legs: %w", len(q.Legs), err)
 	}
-	return out, nil
+
+	var ids []string
+	for _, sv := range out {
+		for _, d := range sv.Days {
+			ids = append(ids, d.AlertIDs...)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil, nil
+	}
+	rows, err = s.pool.Query(ctx, `SELECT alert_id, header, coalesce(url, '') FROM service_alerts WHERE alert_id = ANY($1)`, ids)
+	if err != nil {
+		return nil, nil, fmt.Errorf("alerts for %d services: %w", len(out), err)
+	}
+	texts := map[string]AlertText{}
+	var id string
+	var a AlertText
+	if _, err := pgx.ForEachRow(rows, []any{&id, &a.Header, &a.URL}, func() error {
+		texts[id] = a
+		return nil
+	}); err != nil {
+		return nil, nil, fmt.Errorf("alerts for %d services: %w", len(out), err)
+	}
+	return out, texts, nil
 }
 
 func (a Service) same(b Service) bool {

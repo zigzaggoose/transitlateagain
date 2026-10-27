@@ -322,6 +322,26 @@ func main() {
 		}()
 	}
 
+	// Alerts are one more poller in the same group, so they stop at step 3
+	// with the others, before the pool closes. Asked and approved: a new
+	// goroutine (§15 2026-10-27).
+	if cfg.Poll.AlertsURL != "" {
+		af := config.Feed{ID: "alerts", Label: "Service alerts", RealtimeURL: cfg.Poll.AlertsURL}
+		p := feed.NewPoller(af, client, limiter, storeAlerts(log, db), feed.PollerOptions{
+			Interval: cfg.Poll.AlertsInterval,
+			Jitter:   cfg.Poll.Jitter,
+			Now:      time.Now,
+			Logger:   log,
+		})
+		pollers.Add(1)
+		go func() {
+			defer pollers.Done()
+			if err := p.Run(ctx); err != nil {
+				log.Error("poller exited", "component", "main", "feed_id", af.ID, "err", err.Error())
+			}
+		}()
+	}
+
 	<-ctx.Done()
 	stop()
 
@@ -367,6 +387,26 @@ func main() {
 // than three hours is rare, and /history is then at most four hours behind
 // (§16 q12).
 const rollupSettle = 3 * time.Hour
+
+// storeAlerts decodes an alerts body and records it. A poll lost to a
+// failed write costs nothing the next poll does not carry again: the feed is
+// the whole current state, not a stream.
+func storeAlerts(log *slog.Logger, db *store.Store) feed.Handler {
+	return func(ctx context.Context, r feed.Response) {
+		f, err := gtfsrt.DecodeAlerts(r.Body, r.FetchedAt)
+		if err != nil {
+			log.Error("decode failed", "component", "gtfsrt", "feed_id", r.FeedID, "err", err.Error())
+			return
+		}
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := db.UpsertAlerts(ctx, f); err != nil {
+			log.Error("alerts not stored", "component", "store", "feed_id", r.FeedID, "err", err.Error())
+			return
+		}
+		log.Debug("alerts stored", "component", "store", "alerts", len(f.Alerts), "feed_ts", f.HeaderTS)
+	}
+}
 
 // decodeAndIngest decodes and converts on the poller's goroutine (§9.4), then
 // publishes the poll to the latest-state cache and hands each observation to

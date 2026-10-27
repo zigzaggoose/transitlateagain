@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 )
@@ -26,15 +27,24 @@ func TestServices_EachLegsService_WithEveryTripIDsDaysAtTheDestination(t *testin
 			('f', 'T-742a', 'R', 0, 'HBY', 27720, 'Central', 1), ('f', 'T-742b', 'R', 0, 'HBY', 27720, 'Central', 0),
 			('f', 'T-742c', 'R', 0, 'HBY', 27720, 'Central', 1), ('f', 'T-742d', 'R', 0, 'HBY', 27720, 'Ashfield', 1),
 			('f', 'T-800', 'R', 0, 'HBY', 28800, NULL, 1), ('f', 'T-REV', 'R', 1, 'CEN', 27000, NULL, 1)`,
-		`INSERT INTO stop_visits (service_date, feed_id, trip_id, stop_id, observed_delay_s, trip_rel, stop_time_rel) VALUES
-			('2026-10-20', 'f', 'T-742a', 'CEN1', 120, 0, 0),
-			('2026-10-21', 'f', 'T-742a', 'CEN1', NULL, 3, 0),
-			('2026-10-13', 'f', 'T-742b', 'CEN1', 400, 0, 0),
-			('2026-10-20', 'f', 'T-742a', 'MID', 999, 0, 0),
-			('2026-10-25', 'f', 'T-742a', 'CEN1', 5, 0, 0),
-			('2026-09-01', 'f', 'T-742a', 'CEN1', 5, 0, 0),
-			('2026-10-24', 'f', 'T-800', 'CEN1', 0, 0, 0),
-			('2026-10-20', 'f', 'T-REV', 'CEN1', 0, 0, 0)`,
+		`INSERT INTO stop_visits (service_date, feed_id, trip_id, stop_id, observed_delay_s, trip_rel, stop_time_rel, scheduled_at) VALUES
+			('2026-10-20', 'f', 'T-742a', 'CEN1', 120, 0, 0, '2026-10-20T08:20:00+11:00'),
+			('2026-10-21', 'f', 'T-742a', 'CEN1', NULL, 3, 0, '2026-10-21T08:20:00+11:00'),
+			('2026-10-13', 'f', 'T-742b', 'CEN1', 400, 0, 0, '2026-10-13T08:20:00+11:00'),
+			('2026-10-20', 'f', 'T-742a', 'MID', 999, 0, 0, NULL),
+			('2026-10-25', 'f', 'T-742a', 'CEN1', 5, 0, 0, NULL),
+			('2026-09-01', 'f', 'T-742a', 'CEN1', 5, 0, 0, NULL),
+			('2026-10-24', 'f', 'T-800', 'CEN1', 0, 0, 0, NULL),
+			('2026-10-20', 'f', 'T-REV', 'CEN1', 0, 0, 0, NULL)`,
+		// On the 20th: trackwork on route R that morning, which marks it; a
+		// standing notice on R with no end, and one lasting a fortnight, which
+		// do not; and a trip alert for the old trip id on the 13th.
+		`INSERT INTO service_alerts (alert_id, first_seen_ts, last_seen_ts, cause, effect, header, url, active, route_ids, stop_ids, trip_ids) VALUES
+			('trackwork', now(), now(), 9, 6, 'Buses replace trains', 'https://example.org/a', '{[2026-10-20T07:00:00+11:00,2026-10-20T09:00:00+11:00)}', '{R}', '{}', '{}'),
+			('standing', now(), now(), 1, 8, 'Timetable changes', NULL, '{[2026-01-01T00:00:00+11:00,)}', '{R}', '{}', '{}'),
+			('fortnight', now(), now(), 1, 8, 'Lift works', NULL, '{[2026-10-10T00:00:00+11:00,2026-10-24T00:00:00+11:00)}', '{R}', '{}', '{}'),
+			('other-route', now(), now(), 1, 8, 'Elsewhere', NULL, '{[2026-10-20T07:00:00+11:00,2026-10-20T09:00:00+11:00)}', '{Q}', '{}', '{}'),
+			('late-run', now(), now(), 12, 3, 'Running late', NULL, '{[2026-10-13T08:00:00+11:00,2026-10-13T09:00:00+11:00)}', '{}', '{}', '{T-742b}')`,
 	} {
 		if _, err := s.pool.Exec(ctx, sql); err != nil {
 			t.Fatalf("%s: %v", sql, err)
@@ -46,7 +56,7 @@ func TestServices_EachLegsService_WithEveryTripIDsDaysAtTheDestination(t *testin
 	// runs the other way and has a visit at Central of its own.
 	legs := []Leg{{"f", "T-742a", 27720, 30000}, {"f", "T-742c", 27720, 30000}, {"f", "T-742d", 27720, 30000}, {"f", "T-800", 28800, 31200}}
 	q := ServiceQuery{Legs: legs, ToStops: []string{"CEN", "CEN1"}, FirstDay: day(12), LastDay: day(25), Weekdays: []int32{1, 2, 3, 4, 5}}
-	got, err := s.Services(ctx, q)
+	got, texts, err := s.Services(ctx, q)
 	if err != nil {
 		t.Fatalf("services: %v", err)
 	}
@@ -83,6 +93,16 @@ func TestServices_EachLegsService_WithEveryTripIDsDaysAtTheDestination(t *testin
 			}
 		}
 	})
+	t.Run("a day is marked by a short alert on its route or trip that holds its arrival, and only by one", func(t *testing.T) {
+		for i, want := range [][]string{{"late-run"}, {"trackwork"}, nil} {
+			if got := sv.Days[i].AlertIDs; !slices.Equal(got, want) {
+				t.Errorf("day %s alerts = %v, want %v", sv.Days[i].ServiceDate.Format(time.DateOnly), got, want)
+			}
+		}
+		if len(texts) != 2 || texts["trackwork"].Header != "Buses replace trains" || texts["trackwork"].URL != "https://example.org/a" || texts["late-run"].URL != "" {
+			t.Errorf("texts = %+v", texts)
+		}
+	})
 	t.Run("a cancelled day has no delay rather than the previous row's", func(t *testing.T) {
 		if d := sv.Days[2]; d.DelayS != nil {
 			t.Errorf("21 October delay = %d, want none", *d.DelayS)
@@ -91,7 +111,7 @@ func TestServices_EachLegsService_WithEveryTripIDsDaysAtTheDestination(t *testin
 	t.Run("the weekend asks for the weekend service", func(t *testing.T) {
 		q := q
 		q.Weekdays = []int32{6, 7}
-		got, err := s.Services(ctx, q)
+		got, _, err := s.Services(ctx, q)
 		if err != nil {
 			t.Fatalf("services: %v", err)
 		}

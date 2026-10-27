@@ -79,6 +79,8 @@ func TestLoad_MinimalEnvironment_AppliesDocumentedDefaults(t *testing.T) {
 		{"MAINTENANCE_INTERVAL", cfg.Maintain.Interval, 15 * time.Minute},
 		{"RETENTION_DAYS", cfg.Maintain.RetentionDays, 14},
 		{"VISIT_RETENTION_DAYS", cfg.Maintain.VisitRetentionDays, 180},
+		{"ALERTS_URL", cfg.Poll.AlertsURL, "https://api.transport.nsw.gov.au/v2/gtfs/alerts/all"},
+		{"ALERTS_POLL_INTERVAL", cfg.Poll.AlertsInterval, 5 * time.Minute},
 		{"PARTITION_LOOKAHEAD_DAYS", cfg.Maintain.PartitionLookahead, 3},
 		{"HTTP_ADDR", cfg.HTTP.Addr, ":8080"},
 		{"HTTP_READ_TIMEOUT", cfg.HTTP.ReadTimeout, 10 * time.Second},
@@ -158,6 +160,16 @@ func TestLoad_ValidatedRange_RejectsItsBoundary(t *testing.T) {
 			name:     "zero day retention",
 			env:      map[string]string{"RETENTION_DAYS": "0"},
 			accepted: map[string]string{"RETENTION_DAYS": "1"},
+		},
+		{
+			name:     "an alerts feed over plain http would send the key in clear",
+			env:      map[string]string{"ALERTS_URL": "http://api.example.test/alerts"},
+			accepted: map[string]string{"ALERTS_URL": "https://api.example.test/alerts"},
+		},
+		{
+			name:     "polling alerts faster than the upstream cache refreshes",
+			env:      map[string]string{"ALERTS_POLL_INTERVAL": "60s"},
+			accepted: map[string]string{"ALERTS_POLL_INTERVAL": "90s"},
 		},
 		{
 			name:     "visits kept for less time than the raw rows they summarise",
@@ -244,6 +256,16 @@ func TestLoad_ValidatedRange_RejectsItsBoundary(t *testing.T) {
 				t.Errorf("load rejected the accepted neighbour %v: %v", tc.accepted, err)
 			}
 		})
+	}
+}
+
+func TestLoad_AlertsOff_TurnsThePollerOffWithoutValidatingIt(t *testing.T) {
+	env := baseEnv(t)
+	env["ALERTS_URL"] = "off"
+	env["ALERTS_POLL_INTERVAL"] = "1s" // would be rejected if the poller were on
+	cfg, err := loadWith(t, env)
+	if err != nil || cfg.Poll.AlertsURL != "" {
+		t.Errorf("alerts url %q, err %v; want off", cfg.Poll.AlertsURL, err)
 	}
 }
 

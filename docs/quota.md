@@ -17,10 +17,12 @@ while the download fails.
 | `sydneyferries` | 5,760 | 1 | 0.9 MB | 13 kB |
 | `lightrail-cbdandsoutheast` | 5,760 | 1 | 1.1 MB | 41 kB |
 | `lightrail-parramatta` | 5,760 | 1 | 0.2 MB | 14 kB |
-| **Total** | **28,800** | **5 (worst case 480)** | | |
+| `alerts` (2026-10-27) | 288 | — | — | 524 kB |
+| **Total** | **29,088** | **5 (worst case 480)** | | |
 
-**28,805 requests a day in the normal case, 29,280 in the worst** — 52–53 % of
-`FEED_DAILY_BUDGET`. Measured: 45 requests in a two-minute run with all five
+**29,093 requests a day in the normal case, 29,568 in the worst** — 53–54 % of
+`FEED_DAILY_BUDGET`, with the service alerts poll (`ALERTS_POLL_INTERVAL`, 5 min)
+added on 2026-10-27; 28,805 and 29,280 before it. Measured: 45 requests in a two-minute run with all five
 feeds and their first schedule downloads (2026-09-23), which is the rate above.
 
 The 502s from the Sydney Trains schedule endpoint on the evening of 2026-09-23

@@ -13,12 +13,16 @@ import (
 
 // servicesHarness serves svcs from a fake store and records the query.
 func servicesHarness(svcs []store.Service, err error) (harness, *store.ServiceQuery) {
+	return servicesHarnessWithAlerts(svcs, nil, err)
+}
+
+func servicesHarnessWithAlerts(svcs []store.Service, alerts map[string]store.AlertText, err error) (harness, *store.ServiceQuery) {
 	var got store.ServiceQuery
 	return harness{h: NewHandler(Options{
 		Schedules: func() []*match.Schedule { return []*match.Schedule{fixtureSchedule()} },
-		Services: func(_ context.Context, q store.ServiceQuery) ([]store.Service, error) {
+		Services: func(_ context.Context, q store.ServiceQuery) ([]store.Service, map[string]store.AlertText, error) {
 			got = q
-			return svcs, err
+			return svcs, alerts, err
 		},
 		Stations: func(context.Context) ([]store.Station, error) {
 			return []store.Station{{FeedID: "trains", StopID: "s1", Name: "Stop s1"}}, err
@@ -33,19 +37,19 @@ func servicesHarness(svcs []store.Service, err error) (harness, *store.ServiceQu
 func sday(d int) time.Time { return time.Date(2026, 9, d, 0, 0, 0, 0, time.UTC) }
 
 func TestServices_ReportCardPerService(t *testing.T) {
-	h, q := servicesHarness([]store.Service{{
+	h, q := servicesHarnessWithAlerts([]store.Service{{
 		FeedID: "trains", RouteID: "R1", DirectionID: 0, OriginStopID: "s9", OriginDepS: 7 * 3600,
 		Headsign: "Emu Plains", DepartS: 7*3600 + 42*60, ArriveS: 25*3600 + 10*60,
 		Days: []store.ServiceDay{
-			{ServiceDate: sday(15), DelayS: ptr(int32(400))},  // late
-			{ServiceDate: sday(16), DelayS: ptr(int32(30))},   // on time
-			{ServiceDate: sday(17), DelayS: ptr(int32(-120))}, // early
-			{ServiceDate: sday(18), TripRel: 3},               // cancelled
-			{ServiceDate: sday(19), DelayS: ptr(int32(1000))}, // very late
-			{ServiceDate: sday(22), StopTimeRel: 1},           // skipped
-			{ServiceDate: sday(23)},                           // no delay reported
+			{ServiceDate: sday(15), DelayS: ptr(int32(400)), AlertIDs: []string{"trackwork"}}, // late, with an alert
+			{ServiceDate: sday(16), DelayS: ptr(int32(30))},                                   // on time
+			{ServiceDate: sday(17), DelayS: ptr(int32(-120))},                                 // early
+			{ServiceDate: sday(18), TripRel: 3},                                               // cancelled
+			{ServiceDate: sday(19), DelayS: ptr(int32(1000))},                                 // very late
+			{ServiceDate: sday(22), StopTimeRel: 1},                                           // skipped
+			{ServiceDate: sday(23)},                                                           // no delay reported
 		},
-	}}, nil)
+	}}, map[string]store.AlertText{"trackwork": {Header: "Buses replace trains", URL: "https://example.org/a"}}, nil)
 
 	rec, body := h.get(t, "/v1/services?from=s1&to=s2")
 
@@ -89,6 +93,18 @@ func TestServices_ReportCardPerService(t *testing.T) {
 		days := sv["days"].([]any)
 		if d := days[3].(map[string]any); d["service_date"] != "2026-09-18" || d["status"] != "cancelled" || d["delay_s"] != nil {
 			t.Errorf("18th = %v", d)
+		}
+	})
+	t.Run("a day's alerts are ids, their text given once", func(t *testing.T) {
+		if d := sv["days"].([]any)[0].(map[string]any); len(d["alert_ids"].([]any)) != 1 || sv["n_alert_days"] != 1.0 {
+			t.Errorf("15th = %v, n_alert_days %v", d, sv["n_alert_days"])
+		}
+		if _, ok := sv["days"].([]any)[1].(map[string]any)["alert_ids"]; ok {
+			t.Error("a day with no alert carries alert_ids")
+		}
+		a := body["alerts"].(map[string]any)["trackwork"].(map[string]any)
+		if a["header"] != "Buses replace trains" || a["url"] != "https://example.org/a" {
+			t.Errorf("alerts = %v", body["alerts"])
 		}
 	})
 	t.Run("the typical delay is the median of the days with one", func(t *testing.T) {

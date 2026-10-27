@@ -441,6 +441,16 @@ label.inline input {
   border: 1px solid var(--line);
 }
 
+/* A day TfNSW published an alert for: a ring, so it reads without colour. */
+.days li.alerted {
+  outline: 2px solid var(--fg);
+  outline-offset: 1px;
+}
+
+.service .alerts {
+  margin-top: 6px;
+}
+
 .sr {
   position: absolute;
   width: 1px;

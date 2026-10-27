@@ -26,7 +26,7 @@ type Options struct {
 	History         func(context.Context, store.HistoryQuery) (store.History, error)
 	TripStops       func(ctx context.Context, serviceDate time.Time, feedID, tripID string) (map[string]store.StopObservation, error)
 	Stations        func(context.Context) ([]store.Station, error)
-	Services        func(context.Context, store.ServiceQuery) ([]store.Service, error)
+	Services        func(context.Context, store.ServiceQuery) ([]store.Service, map[string]store.AlertText, error)
 	HistoryMaxDays  int
 	RateLimit       float64 // HTTP_RATE_LIMIT_RPS per client IP; 0 disables it
 	ClientIPHeader  string  // HTTP_CLIENT_IP_HEADER; empty means the connection's address

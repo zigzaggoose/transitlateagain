@@ -66,6 +66,11 @@ type PollConfig struct {
 	DailyBudget int           // FEED_DAILY_BUDGET
 	StalePolls  int           // FEED_STALE_POLLS
 	MaxSkew     time.Duration // FEED_MAX_SKEW
+
+	// AlertsURL is TfNSW's service alerts for every mode in one feed; ""
+	// (ALERTS_URL=off) turns the alerts poller off.
+	AlertsURL      string        // ALERTS_URL
+	AlertsInterval time.Duration // ALERTS_POLL_INTERVAL
 }
 
 // ScheduleConfig governs the daily static GTFS reload.
@@ -162,6 +167,10 @@ func load(lookup func(string) (string, bool)) (*Config, error) {
 			DailyBudget: l.int("FEED_DAILY_BUDGET", 55000),
 			StalePolls:  l.int("FEED_STALE_POLLS", 8),
 			MaxSkew:     l.dur("FEED_MAX_SKEW", 5*time.Minute),
+			// The response says max-age=90, and alerts are published minutes
+			// to days ahead: every 5 minutes is 288 requests a day.
+			AlertsURL:      l.str("ALERTS_URL", "https://api.transport.nsw.gov.au/v2/gtfs/alerts/all"),
+			AlertsInterval: l.dur("ALERTS_POLL_INTERVAL", 5*time.Minute),
 		},
 		Schedule: ScheduleConfig{
 			RefreshInterval: l.dur("SCHEDULE_REFRESH_INTERVAL", 24*time.Hour),
@@ -267,6 +276,19 @@ func (c *Config) validate() []error {
 	}
 	if c.Poll.Jitter < 0 {
 		bad("FEED_POLL_JITTER is negative (%s)", c.Poll.Jitter)
+	}
+	// An empty variable reads as unset, so off needs a word.
+	if c.Poll.AlertsURL == "off" {
+		c.Poll.AlertsURL = ""
+	}
+	if c.Poll.AlertsURL != "" {
+		if err := checkFeedURL("ALERTS_URL", "url", c.Poll.AlertsURL); err != nil {
+			bad("%s", err.Error())
+		}
+		// The feed is cached upstream for 90 s; faster spends quota on copies.
+		if c.Poll.AlertsInterval < 90*time.Second {
+			bad("ALERTS_POLL_INTERVAL is %s, minimum 90s", c.Poll.AlertsInterval)
+		}
 	}
 	if c.Poll.HTTPTimeout <= 0 {
 		bad("FEED_HTTP_TIMEOUT is not positive (%s)", c.Poll.HTTPTimeout)
