@@ -1,52 +1,77 @@
 # Storage
 
-`PROJECT.md` §13's storage rows. **What exists so far is one evening of data on
-a laptop**, measured 2026-09-23; the daily figures below are projections from
-it, marked as such, and must be replaced after a full day on the VM.
+`PROJECT.md` §13's storage rows, measured on the VM on **2026-10-27 at 22:20**
+(BinaryLane 1 GB / 20 GB, five feeds, `RETENTION_DAYS=7`), by
+`deploy/release.sh` straight after deploying `08c5f46`. Row counts are
+Postgres's estimates (`pg_class.reltuples`), not `count(*)`.
 
 ## Raw observations
 
-| | Measured |
-|---|---|
-| Bytes per row, heap + indexes | **265.9** (`observations_2026_09_23`: 42,139 rows, 11 MB); 276.9 on 2026-09-21 |
-| Rows written, first minutes after start, five feeds (23:21, late evening) | 3,201 in 105 s: trains 794, CBD light rail 858, metro 784, Parramatta 513, ferries 252 |
-| Rows written, trains alone, off-peak steady state (2026-09-21) | ~670 a minute |
+The seven complete service days in the retention window:
 
-The change filter is what keeps this small: 100 % of 3,939 train updates were
-identical across two polls 15 s apart (2026-09-21), so a trip running to time
-writes one row per stop per day rather than one per poll.
+| Partition | Size | Rows | |
+|---|---:|---:|---|
+| `observations_2026_10_20` | 521 MB | 1,953,022 | Tue |
+| `observations_2026_10_21` | 535 MB | 2,004,186 | Wed |
+| `observations_2026_10_22` | 491 MB | 1,820,121 | Thu |
+| `observations_2026_10_23` | 552 MB | 2,026,411 | Fri |
+| `observations_2026_10_24` | 416 MB | 1,430,414 | Sat |
+| `observations_2026_10_25` | 448 MB | 1,629,976 | Sun |
+| `observations_2026_10_26` | 715 MB | 2,564,691 | Mon, the first T1 North Shore trackwork night |
+| **Seven days** | **3,678 MB** | **13,428,821** | |
 
-**Projection, not measurement:** trains at ~270 MB a day (2026-09-21 rate). The
-first minutes above put the four smaller feeds together at about the trains'
-row count, but minutes just after a start include each feed's cold-filter
-burst, so doubling is an upper estimate. At the deployed `RETENTION_DAYS=7`, that is on the order of 4 GB of raw
-partitions against the §13 target of ≤ 10 GB, on a 20 GB disk.
+- **~287 bytes a row**, heap and indexes. The laptop's one evening in September
+  gave 266–277; the difference is index growth at full size.
+- **~525 MB a day** on average: ~563 MB a weekday, ~432 MB a weekend day. The
+  September projection of ~270 MB a day was trains alone, off-peak.
+- **~3.7 GB** at `RETENTION_DAYS=7`.
 
 ## Rollups
 
-One real hour, trains only (21:00–22:00 on 2026-09-23): **7,105 raw rows**
-became **646 rollup rows** (610 stop, 36 route) — before the all-routes stop
-rows were added, which add one row per stop per hour.
+| Table | Size | Rows |
+|---|---:|---:|
+| `otp_stop_hourly` | 241 MB | 1,206,727 |
+| `otp_route_hourly` | 10 MB | 54,559 |
 
-| Table | Rows | Size | Note |
-|---|---:|---:|---|
-| `otp_stop_hourly` | 610 | 184 kB | mostly page overhead at this size |
-| `otp_route_hourly` | 36 | 48 kB | one 8 kB page per table and index minimum |
+251 MB for the ~33 days since the first rollup on the VM (2026-09-24), so
+**~7.6 MB a day**. That is an average over the whole history, not one day's
+delta measured on its own. Against ~525 MB of raw rows a day, the rollups keep
+**~98.6 %** less (`1 − 7.6 / 525`).
 
-At this size the per-row figure is dominated by empty pages, so a reduction
-ratio from this hour would mislead. The synthetic 30-day load-test database
-gives an upper bound for a month of rollups: 5.08M stop rows and 219k route
-rows in 1.26 GB with every stop, route and direction present every hour — real
-rollups are sparser, because an hour with no visit writes no row.
+## Per-service history (migrations/0007)
 
-## To measure on the VM
+| Table | Size | Rows |
+|---|---:|---:|
+| `stop_visits` | 108 MB | 552,942 (backfilled, 8 days) |
+| `trip_services` | 31 MB | 157,145 |
 
-After 24 hours running there, fill these into §13:
+- **~205 bytes a visit**, against 209 measured on 1.7M synthetic rows.
+- ~77,000 visits a weekday and ~54,000 a weekend day, all five feeds: what the
+  feeds reported, below the 96,542 the timetable schedules on a weekday.
+- So **~15 MB a weekday, ~95 MB a week, ~2.4 GB** at `VISIT_RETENTION_DAYS=180`.
+- `trip_services` growth is not measured yet: 157,145 rows on the first day.
+
+## Whole database and disk
+
+- `pg_database_size`: **6,062 MB**, under the §13 target of 10 GB. By
+  subtraction, ~1.6 GB of it is none of the tables above (the seven days,
+  today's partial 410 MB, the rollups and the two new tables): most likely the
+  stored timetable versions, 212 MB per trains version when measured in
+  September. Not measured directly.
+- Disk: **16 GB of 20 GB used, 2.8 GB free (86 %)**. The database is 6 GB of
+  that 16 GB; the rest is not measured yet, most likely Docker images and
+  build cache from each `up --build`. That is already past the 15 % free of
+  `TransitLateAgainDiskLow` (§10.4), and `stop_visits` growing by ~2.4 GB over
+  its first 180 days would nearly fill what is left. See §16 q13.
+
+## Re-measuring
+
+`sh deploy/release.sh` prints all of the above after every deploy. On its own,
+on the VM:
 
 ```sql
-SELECT pg_size_pretty(pg_total_relation_size('observations_YYYY_MM_DD'));   -- raw, one full day
-SELECT pg_size_pretty(pg_total_relation_size('otp_stop_hourly') + pg_total_relation_size('otp_route_hourly'));
+SELECT c.relname, pg_size_pretty(pg_total_relation_size(c.oid)), c.reltuples::bigint
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent IN ('observations'::regclass, 'stop_visits'::regclass) ORDER BY 1;
 SELECT pg_size_pretty(pg_database_size(current_database()));
 ```
-
-and the reduction: `1 − rollup bytes for the day / raw bytes for the day`.

@@ -1,18 +1,18 @@
 # HANDOFF.md
 
-Session state as of **2026-10-27, evening**. This session's work is three commits on
-`main` after `5af5f5b`, one per step below, **not yet pushed or deployed**. Rewrite this
+Session state as of **2026-10-27, evening**. This session's work is on `main` after
+`5af5f5b` and **deployed** (`08c5f46`, 2026-10-27 22:17, backfill done). Rewrite this
 file when it stops being true. Permanent rules live in `CLAUDE.md`; design in
 `PROJECT.md` (§12 milestones, §15 decisions, §16 open questions). Every
 deployment step ever run is in `deploy/vm-bootstrap.md`.
 
-## This session: service report cards (committed, not deployed)
+## This session: service report cards (deployed)
 
 Five steps the user asked for, from a review of how to make the site worth
 visiting. §15 has a row for each, dated 2026-10-27.
 
-1. **Storage over a full day** — *not done*: reads on the VM were not
-   permitted from this session. Run the queries in "Due next" below.
+1. **Storage over a full day** — measured on the VM after the deploy;
+   `docs/storage.md`.
 2. **Trip id stability** — measured on the two stored train bundles: 92 % of
    trip ids carry over a day, 99.9 % of service keys do. Hence (3).
 3. `migrations/0007`: `trip_services` (trip id → service key, filled by the
@@ -110,19 +110,12 @@ either means editing both `.env` files, then `$C up -d` on the VM.
 
 ## Due next
 
-1. **Storage over a full day, the last unticked box in the plan**, now a
-   month overdue and also what sizes `VISIT_RETENTION_DAYS` (§16 q13). On the
-   VM (`cd /opt/transitlateagain && $C exec postgres psql -U headway`):
-   ```sql
-   SELECT c.relname, pg_size_pretty(pg_total_relation_size(c.oid)), c.reltuples::bigint
-   FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-   WHERE i.inhparent = 'observations'::regclass ORDER BY 1;
-   SELECT pg_size_pretty(pg_total_relation_size('otp_stop_hourly') + pg_total_relation_size('otp_route_hourly'));
-   SELECT pg_size_pretty(pg_database_size(current_database()));
-   ```
-   Fill in `docs/storage.md` and the two "baseline TBD" rows of §13, and tick
-   the Stage 3 box. After a month of the new tables, measure `stop_visits`,
-   `trip_services` and `service_alerts` too (§16 q13, q14).
+1. **Disk: 86 % used, 2.8 GB free** (2026-10-27). The database is 6 of the
+   16 GB used; find the rest with `docker system df` on the VM (likely old
+   images and build cache) and clear it before `stop_visits` grows by ~2.4 GB
+   over 180 days (§16 q13, `docs/storage.md`). Storage itself is measured and
+   the Stage 3 box ticked. After a month, re-measure `stop_visits`,
+   `trip_services` and `service_alerts` (§16 q13, q14).
 2. **Ride-check the numbers**: take two or three trains you know, and compare
    what `/services` says about those days with what happened.
 3. **§13 freshness p50** is unmeasured, and the p95 (17.7 s) is a six-minute
