@@ -355,6 +355,68 @@ func TestLoad_Retention_KeepsTheNewestVersions(t *testing.T) {
 	}
 }
 
+func TestLoad_TripServices_KeyEachTripOnceAndOutliveItsVersion(t *testing.T) {
+	h := newHarness(t, 1)
+	h.up.set(gtfs(t, "a"), lm1)
+	h.load(t)
+
+	type key struct {
+		route, origin string
+		dir           int16
+		depS          int32
+		headsign      string
+	}
+	read := func(trip string) key {
+		t.Helper()
+		var k key
+		if err := h.pool.QueryRow(context.Background(), `
+			SELECT route_id, origin_stop_id, direction_id, origin_dep_s, headsign
+			FROM trip_services WHERE feed_id = 'sydneytrains' AND trip_id = $1`, trip,
+		).Scan(&k.route, &k.origin, &k.dir, &k.depS, &k.headsign); err != nil {
+			t.Fatalf("read trip_services %s: %v", trip, err)
+		}
+		return k
+	}
+
+	t.Run("the origin is the parent station and the time its departure", func(t *testing.T) {
+		if got, want := read("T-1"), (key{"APS_1a", "200060", 0, 23*3600 + 51*60, "Macarthur"}); got != want {
+			t.Errorf("T-1 = %+v, want %+v", got, want)
+		}
+	})
+
+	// A later bundle that retimes T-1, with the first version pruned (keep 1).
+	b := map[string]string{
+		"agency.txt": "agency_id,agency_name\nSydneyTrains,Sydney Trains\n",
+		"routes.txt": "route_id,agency_id,route_short_name,route_long_name,route_type\nAPS_1a,SydneyTrains,T8,Airport,2\n",
+		"stops.txt":  "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n200060,Central,-33.88,151.2,1,\n2000341,Central Platform 4,-33.88,151.2,0,200060\n",
+		"trips.txt":  "route_id,service_id,trip_id,trip_headsign,direction_id\nAPS_1a,SVC,T-1,Macarthur,0\nAPS_1a,SVC,T-3,City,1\n",
+		"stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n" +
+			"T-1,07:00:00,07:00:00,2000341,1\nT-3,08:59:31,08:59:31,2000341,1\n",
+		"calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nSVC,1,1,1,1,1,0,0,20260921,20261231\n",
+	}
+	h.up.set(bundle(t, b), lm1.Add(24*time.Hour))
+	h.load(t)
+
+	t.Run("a trip id already named keeps its first key", func(t *testing.T) {
+		if got := read("T-1").depS; got != 23*3600+51*60 {
+			t.Errorf("T-1 departs at %d, want the first version's 85860", got)
+		}
+	})
+	t.Run("a pruned version's trips stay named", func(t *testing.T) {
+		if n := h.count(t, `SELECT count(*) FROM schedule_versions`); n != 1 {
+			t.Fatalf("%d versions, want 1: the first was not pruned", n)
+		}
+		if got := read("T-2").depS; got != 8*3600+60 {
+			t.Errorf("T-2 departs at %d, want 08:00:30 as 08:01, 28860", got)
+		}
+	})
+	t.Run("a new trip id is added, its departure rounded to the minute a rider reads", func(t *testing.T) {
+		if got := read("T-3").depS; got != 9*3600 {
+			t.Errorf("T-3 departs at %d, want 08:59:31 as 09:00, 32400", got)
+		}
+	})
+}
+
 // §12 Stage 2: the partial unique index, not application code, is what makes
 // two active versions impossible.
 func TestSchema_SecondActiveVersion_IsRejectedByTheIndex(t *testing.T) {

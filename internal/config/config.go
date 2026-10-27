@@ -106,6 +106,7 @@ type Thresholds struct {
 type MaintainConfig struct {
 	Interval           time.Duration // MAINTENANCE_INTERVAL
 	RetentionDays      int           // RETENTION_DAYS
+	VisitRetentionDays int           // VISIT_RETENTION_DAYS
 	PartitionLookahead int           // PARTITION_LOOKAHEAD_DAYS
 }
 
@@ -187,6 +188,7 @@ func load(lookup func(string) (string, bool)) (*Config, error) {
 		Maintain: MaintainConfig{
 			Interval:           l.dur("MAINTENANCE_INTERVAL", 15*time.Minute),
 			RetentionDays:      l.int("RETENTION_DAYS", 14),
+			VisitRetentionDays: l.int("VISIT_RETENTION_DAYS", 180),
 			PartitionLookahead: l.int("PARTITION_LOOKAHEAD_DAYS", 3),
 		},
 		HTTP: HTTPConfig{
@@ -337,6 +339,11 @@ func (c *Config) validate() []error {
 	}
 	if c.Maintain.RetentionDays < 1 {
 		bad("RETENTION_DAYS is %d, want at least 1", c.Maintain.RetentionDays)
+	}
+	// stop_visits is what the rollups are rebuilt from, so it must reach
+	// back at least as far as the raw rows it summarises.
+	if c.Maintain.VisitRetentionDays < c.Maintain.RetentionDays {
+		bad("VISIT_RETENTION_DAYS is %d, want at least RETENTION_DAYS (%d)", c.Maintain.VisitRetentionDays, c.Maintain.RetentionDays)
 	}
 	// At zero, today's partition is the last one that exists and tomorrow's
 	// writes fall into observations_default, which cannot be dropped.

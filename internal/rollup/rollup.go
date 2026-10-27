@@ -15,6 +15,7 @@ import (
 type Result struct {
 	From, To  time.Time // the window, [From, To); equal when nothing was due
 	Finals    int64     // stop visits whose final word fell in the window
+	Visits    int64     // rows written to stop_visits
 	StopRows  int64
 	RouteRows int64
 }
@@ -74,8 +75,8 @@ func (j *Job) Rollup(ctx context.Context) (Result, error) {
 			CREATE TEMP TABLE final ON COMMIT DROP AS
 			SELECT * FROM (
 				SELECT DISTINCT ON (service_date, feed_id, trip_id, stop_id)
-				       service_date, stop_id, route_id, direction_id,
-				       observed_delay_s, stop_time_rel, trip_rel,
+				       service_date, feed_id, trip_id, stop_id, route_id, direction_id,
+				       scheduled_at, observed_delay_s, stop_time_rel, trip_rel,
 				       coalesce(scheduled_at, feed_ts) AS bucket_ts
 				FROM observations
 				WHERE service_date BETWEEN $1 AND $2
@@ -88,6 +89,22 @@ func (j *Job) Rollup(ctx context.Context) (Result, error) {
 			return fmt.Errorf("select final observations: %w", err)
 		}
 		res.Finals = tag.RowsAffected()
+
+		// Keep the visits themselves, past raw retention (migrations/0007).
+		// DO UPDATE rather than NOTHING: an unmatched visit is bucketed by its
+		// last observation, so one that is still being reported can close in
+		// two windows, and the later word is the one to keep.
+		tag, err = tx.Exec(ctx, `
+			INSERT INTO stop_visits (service_date, feed_id, trip_id, stop_id, scheduled_at, observed_delay_s, trip_rel, stop_time_rel)
+			SELECT service_date, feed_id, trip_id, stop_id, scheduled_at, observed_delay_s, trip_rel, stop_time_rel
+			FROM final
+			ON CONFLICT (service_date, feed_id, trip_id, stop_id) DO UPDATE SET
+				scheduled_at = EXCLUDED.scheduled_at, observed_delay_s = EXCLUDED.observed_delay_s,
+				trip_rel = EXCLUDED.trip_rel, stop_time_rel = EXCLUDED.stop_time_rel`)
+		if err != nil {
+			return fmt.Errorf("keep stop visits: %w", err)
+		}
+		res.Visits = tag.RowsAffected()
 
 		// Buckets are UTC hours (migrations/0003). service_date is not in
 		// the key, and one bucket at one stop can hold visits from two
@@ -168,7 +185,7 @@ func (j *Job) Rollup(ctx context.Context) (Result, error) {
 	}
 	if res.To.After(res.From) {
 		j.log.Info("rolled up",
-			"from", res.From, "to", res.To, "finals", res.Finals,
+			"from", res.From, "to", res.To, "finals", res.Finals, "visits", res.Visits,
 			"stop_rows", res.StopRows, "route_rows", res.RouteRows)
 	}
 	return res, nil

@@ -182,6 +182,24 @@ func (l *Loader) insert(ctx context.Context, feedID string, sum []byte, lastModi
 	); err != nil {
 		return 0, nil, fmt.Errorf("record schedule counts (feed=%s, version=%d): %w", feedID, id, err)
 	}
+	// Name this version's new trip ids by service (migrations/0007), the
+	// departure to the minute as there. A trip id already named keeps its
+	// first key: none has been seen to change, and a visit stored under it
+	// must keep meaning the same train.
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO trip_services (feed_id, trip_id, route_id, direction_id, origin_stop_id, origin_dep_s, headsign, first_version_id)
+		SELECT DISTINCT ON (st.trip_id)
+		       $2, st.trip_id, t.route_id, coalesce(t.direction_id, -1),
+		       coalesce(s.parent_station, st.stop_id), (coalesce(st.departure_s, st.arrival_s) + 30) / 60 * 60,
+		       t.headsign, $1
+		FROM stop_times st
+		JOIN trips t ON t.version_id = st.version_id AND t.trip_id = st.trip_id
+		JOIN stops s ON s.version_id = st.version_id AND s.stop_id = st.stop_id
+		WHERE st.version_id = $1 AND coalesce(st.departure_s, st.arrival_s) IS NOT NULL
+		ORDER BY st.trip_id, st.stop_sequence
+		ON CONFLICT (feed_id, trip_id) DO NOTHING`, id, feedID); err != nil {
+		return 0, nil, fmt.Errorf("record trip services (feed=%s, version=%d): %w", feedID, id, err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, nil, fmt.Errorf("commit schedule load (feed=%s, version=%d): %w", feedID, id, err)
 	}

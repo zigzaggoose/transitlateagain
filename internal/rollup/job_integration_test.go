@@ -445,3 +445,123 @@ func TestRollup_AllRoutesRow_HasExactPercentilesAcrossRoutes(t *testing.T) {
 		t.Errorf("all routes: n %d p50 %d p90 %d; want 5, 100, 300", n, p50, p90)
 	}
 }
+
+func TestRollup_StopVisits_KeepTheLastWordOfEachVisit(t *testing.T) {
+	h := newHarness(t, sydney(11, 5))
+	h.insert(t,
+		row{serviceDate: date(23), trip: "T1", stop: "A", route: "R", delay: d(60), feedTS: sydney(7, 10), scheduledAt: sched(8, 50)},
+		row{serviceDate: date(23), trip: "T1", stop: "A", route: "R", delay: d(400), feedTS: sydney(8, 55), scheduledAt: sched(8, 50)},
+		row{serviceDate: date(23), trip: "T3", stop: "A", route: "R", tripRel: 3, feedTS: sydney(8, 45), scheduledAt: sched(8, 40)},
+		row{serviceDate: date(23), trip: "T4", stop: "A", delay: d(1000), feedTS: sydney(8, 50)},
+	)
+
+	res := h.rollup(t)
+
+	if res.Visits != 3 {
+		t.Errorf("visits = %d, want 3", res.Visits)
+	}
+	type visit struct {
+		delay   *int32
+		tripRel int16
+		sched   *time.Time
+	}
+	read := func(trip string) visit {
+		t.Helper()
+		var v visit
+		if err := h.pool.QueryRow(context.Background(), `
+			SELECT observed_delay_s, trip_rel, scheduled_at FROM stop_visits
+			WHERE service_date = $1 AND feed_id = 'sydneytrains' AND trip_id = $2 AND stop_id = 'A'`, date(23), trip,
+		).Scan(&v.delay, &v.tripRel, &v.sched); err != nil {
+			t.Fatalf("read visit %s: %v", trip, err)
+		}
+		return v
+	}
+	t.Run("a visit predicted twice keeps the final delay and its scheduled time", func(t *testing.T) {
+		if v := read("T1"); v.delay == nil || *v.delay != 400 || v.sched == nil || !v.sched.Equal(*sched(8, 50)) {
+			t.Errorf("T1 = %+v, want delay 400 scheduled 08:50", v)
+		}
+	})
+	t.Run("a cancelled call keeps its trip relationship", func(t *testing.T) {
+		if v := read("T3"); v.tripRel != 3 || v.delay != nil {
+			t.Errorf("T3 = %+v, want trip_rel 3 and no delay", v)
+		}
+	})
+	t.Run("an unmatched visit is kept with no scheduled time", func(t *testing.T) {
+		if v := read("T4"); v.sched != nil || v.delay == nil || *v.delay != 1000 {
+			t.Errorf("T4 = %+v, want delay 1000 and no scheduled time", v)
+		}
+	})
+}
+
+func TestRollup_StopVisits_AnUnmatchedVisitClosingTwice_KeepsTheLaterWord(t *testing.T) {
+	h := newHarness(t, sydney(10, 5))
+	h.insert(t, row{serviceDate: date(23), trip: "U", stop: "A", delay: d(100), feedTS: sydney(8, 50)})
+	h.rollup(t)
+	h.insert(t, row{serviceDate: date(23), trip: "U", stop: "A", delay: d(700), feedTS: sydney(9, 30)})
+	h.now = sydney(11, 5)
+
+	h.rollup(t)
+
+	if n := h.count(t, `SELECT count(*) FROM stop_visits`); n != 1 {
+		t.Errorf("%d visit rows, want 1", n)
+	}
+	if n := h.count(t, `SELECT observed_delay_s FROM stop_visits`); n != 700 {
+		t.Errorf("delay = %d, want the later 700", n)
+	}
+}
+
+// The migration creates the current and next month on its own, so these use
+// months well before the test runs.
+func visitMonth(m time.Month) time.Time { return time.Date(2026, m, 1, 0, 0, 0, 0, time.UTC) }
+
+func TestEnsureVisitPartitions_CreatesEachMonthOnce(t *testing.T) {
+	h := newHarness(t, sydney(12, 0))
+	ctx := context.Background()
+
+	created, err := h.job.EnsureVisitPartitions(ctx, visitMonth(7).AddDate(0, 0, 14), visitMonth(8).AddDate(0, 0, 1))
+	if err != nil || strings.Join(created, ",") != "stop_visits_2026_07,stop_visits_2026_08" {
+		t.Fatalf("created %v, err %v; want July and August", created, err)
+	}
+	again, err := h.job.EnsureVisitPartitions(ctx, visitMonth(7), visitMonth(8))
+	if err != nil || len(again) != 0 {
+		t.Errorf("second run created %v, err %v; want nothing", again, err)
+	}
+	if _, err := h.pool.Exec(ctx, `INSERT INTO stop_visits (service_date, feed_id, trip_id, stop_id, trip_rel, stop_time_rel) VALUES ('2026-07-31', 'f', 'T', 'A', 0, 0)`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if n := h.count(t, `SELECT count(*) FROM stop_visits_2026_07`); n != 1 {
+		t.Errorf("%d rows in July's partition, want 1", n)
+	}
+}
+
+// §9.3 case 3, for visits: a month is dropped only once it is past retention
+// and the rollup has closed every hour its service dates can be scheduled in.
+func TestDropVisitPartitionsBefore_DropsOnlyClosedMonthsPastRetention(t *testing.T) {
+	h := newHarness(t, sydney(12, 0))
+	ctx := context.Background()
+	if _, err := h.job.EnsureVisitPartitions(ctx, visitMonth(6), visitMonth(8)); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	setWatermark := func(w time.Time) {
+		t.Helper()
+		if _, err := h.pool.Exec(ctx, `UPDATE rollup_state SET watermark = $1`, w); err != nil {
+			t.Fatalf("set watermark: %v", err)
+		}
+	}
+	cutoff := visitMonth(8).AddDate(0, 0, 14)
+
+	t.Run("a month whose last service dates are not yet rolled up is kept", func(t *testing.T) {
+		setWatermark(visitMonth(8).AddDate(0, 0, 1)) // 1 August: July's last day can still be scheduled on the 2nd
+		dropped, err := h.job.DropVisitPartitionsBefore(ctx, cutoff)
+		if err != nil || strings.Join(dropped, ",") != "stop_visits_2026_06" {
+			t.Errorf("dropped %v, err %v; want only June", dropped, err)
+		}
+	})
+	t.Run("a month that ends after the cutoff is kept however far the watermark has gone", func(t *testing.T) {
+		setWatermark(visitMonth(10))
+		dropped, err := h.job.DropVisitPartitionsBefore(ctx, cutoff)
+		if err != nil || strings.Join(dropped, ",") != "stop_visits_2026_07" {
+			t.Errorf("dropped %v, err %v; want July, not August", dropped, err)
+		}
+	})
+}

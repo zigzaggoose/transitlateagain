@@ -24,9 +24,11 @@ import (
 // Options are the §8 values the job uses.
 type Options struct {
 	OnTime        config.Thresholds
-	RetentionDays int           // RETENTION_DAYS
-	LookaheadDays int           // PARTITION_LOOKAHEAD_DAYS
-	Interval      time.Duration // MAINTENANCE_INTERVAL
+	RetentionDays int // RETENTION_DAYS
+	// VisitRetentionDays is how long stop_visits is kept (VISIT_RETENTION_DAYS).
+	VisitRetentionDays int
+	LookaheadDays      int           // PARTITION_LOOKAHEAD_DAYS
+	Interval           time.Duration // MAINTENANCE_INTERVAL
 	// Settle is how long after an hour ends it is rolled up. Visits are
 	// bucketed by their scheduled hour, and a late train's final word comes
 	// after that hour; each hour is rolled up once, so anything said about it
@@ -78,7 +80,8 @@ func (j *Job) Run(ctx context.Context) {
 	}
 }
 
-// Tick runs the three steps in §4.2's order. Partitions are also ensured
+// Tick runs the three steps in §4.2's order, for observations and for
+// stop_visits. Partitions are also ensured
 // first, so a fresh database stops filling the default partition on the
 // first tick rather than the second. A failed step does not stop the later
 // ones, except that retention never runs after a failed rollup: it would be
@@ -89,13 +92,21 @@ func (j *Job) Tick(ctx context.Context) error {
 	if _, err := j.EnsurePartitions(ctx, today.AddDate(0, 0, -1), today.AddDate(0, 0, j.opts.LookaheadDays)); err != nil {
 		errs = append(errs, err)
 	}
+	if _, err := j.EnsureVisitPartitions(ctx, today.AddDate(0, 0, -2), today.AddDate(0, 1, 0)); err != nil {
+		errs = append(errs, err)
+	}
 	started := j.now()
 	_, err := j.Rollup(ctx)
 	metrics.RollupDuration.Observe(j.now().Sub(started).Seconds())
 	if err != nil {
 		errs = append(errs, err)
-	} else if _, err := j.DropPartitionsBefore(ctx, today.AddDate(0, 0, -j.opts.RetentionDays)); err != nil {
-		errs = append(errs, err)
+	} else {
+		if _, err := j.DropPartitionsBefore(ctx, today.AddDate(0, 0, -j.opts.RetentionDays)); err != nil {
+			errs = append(errs, err)
+		}
+		if _, err := j.DropVisitPartitionsBefore(ctx, today.AddDate(0, 0, -j.opts.VisitRetentionDays)); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if j.opts.ExpireFilter != nil {
 		// Yesterday's trips are still running after midnight; anything
@@ -246,3 +257,102 @@ func (j *Job) DropPartitionsBefore(ctx context.Context, cutoff time.Time) ([]str
 }
 
 var errNotRolledUp = errors.New("partition has rows past the rollup watermark")
+
+var visitPartitionName = regexp.MustCompile(`^stop_visits_(\d{4})_(\d{2})$`)
+
+func month(d time.Time) time.Time { return time.Date(d.Year(), d.Month(), 1, 0, 0, 0, 0, time.UTC) }
+
+// visitPartitions lists stop_visits' monthly partitions by first day, oldest
+// first.
+func (j *Job) visitPartitions(ctx context.Context) ([]time.Time, error) {
+	rows, err := j.pool.Query(ctx, `
+		SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+		WHERE i.inhparent = 'stop_visits'::regclass`)
+	if err != nil {
+		return nil, fmt.Errorf("list visit partitions: %w", err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("list visit partitions: %w", err)
+	}
+	var out []time.Time
+	for _, n := range names {
+		if m := visitPartitionName.FindStringSubmatch(n); m != nil {
+			if d, err := time.Parse("2006-01", m[1]+"-"+m[2]); err == nil {
+				out = append(out, d)
+			}
+		}
+	}
+	slices.SortFunc(out, time.Time.Compare)
+	return out, nil
+}
+
+// EnsureVisitPartitions creates a monthly stop_visits partition for every
+// month from from's to to's that lacks one. The rollup only writes hours it
+// has closed, so a month is created long before its first visit and nothing
+// should reach stop_visits_default.
+//
+// ponytail: no move out of the default partition, unlike EnsurePartitions;
+// if a stray row ever lands there, creating its month fails here, loudly, on
+// every tick. Add the move when that has happened once.
+func (j *Job) EnsureVisitPartitions(ctx context.Context, from, to time.Time) ([]string, error) {
+	have, err := j.visitPartitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var created []string
+	for m := month(from); !m.After(month(to)); m = m.AddDate(0, 1, 0) {
+		if slices.ContainsFunc(have, m.Equal) {
+			continue
+		}
+		name := "stop_visits_" + m.Format("2006_01")
+		if _, err := j.pool.Exec(ctx, fmt.Sprintf(`CREATE TABLE %s PARTITION OF stop_visits FOR VALUES FROM ('%s') TO ('%s')`,
+			pgx.Identifier{name}.Sanitize(), m.Format(time.DateOnly), m.AddDate(0, 1, 0).Format(time.DateOnly))); err != nil {
+			return created, fmt.Errorf("create partition %s: %w", name, err)
+		}
+		created = append(created, name)
+	}
+	if len(created) > 0 {
+		j.log.Info("visit partitions created", "partitions", created)
+	}
+	return created, nil
+}
+
+// DropVisitPartitionsBefore drops each monthly stop_visits partition that
+// ends on or before cutoff and that the rollup watermark has passed: the
+// visits in it are then counted in otp_*_hourly and past retention.
+func (j *Job) DropVisitPartitionsBefore(ctx context.Context, cutoff time.Time) ([]string, error) {
+	have, err := j.visitPartitions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var watermark time.Time
+	if err := j.pool.QueryRow(ctx, `SELECT watermark FROM rollup_state WHERE name = 'hourly'`).Scan(&watermark); err != nil {
+		return nil, fmt.Errorf("read watermark: %w", err)
+	}
+	var dropped []string
+	for _, m := range have {
+		// A service date's visits are scheduled up to 48 h past its start
+		// (SERVICE_TIME_MAX_S), so the month is closed two days after it ends.
+		end := m.AddDate(0, 1, 0)
+		if end.After(cutoff) || end.AddDate(0, 0, 2).After(watermark) {
+			break
+		}
+		name := "stop_visits_" + m.Format("2006_01")
+		err := pgx.BeginFunc(ctx, j.pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SET LOCAL lock_timeout = '5s'`); err != nil { // §9.3 case 5
+				return err
+			}
+			_, err := tx.Exec(ctx, `DROP TABLE `+pgx.Identifier{name}.Sanitize())
+			return err
+		})
+		if err != nil {
+			return dropped, fmt.Errorf("drop partition %s: %w", name, err)
+		}
+		dropped = append(dropped, name)
+	}
+	if len(dropped) > 0 {
+		j.log.Info("visit partitions dropped", "partitions", dropped)
+	}
+	return dropped, nil
+}

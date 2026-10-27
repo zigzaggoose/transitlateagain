@@ -97,10 +97,11 @@ func main() {
 	}
 	if *maintainOnce {
 		job := rollup.New(db.Pool(), rollup.Options{
-			OnTime:        cfg.OnTime,
-			RetentionDays: cfg.Maintain.RetentionDays,
-			LookaheadDays: cfg.Maintain.PartitionLookahead,
-			Settle:        rollupSettle,
+			OnTime:             cfg.OnTime,
+			RetentionDays:      cfg.Maintain.RetentionDays,
+			VisitRetentionDays: cfg.Maintain.VisitRetentionDays,
+			LookaheadDays:      cfg.Maintain.PartitionLookahead,
+			Settle:             rollupSettle,
 		}, time.Now, log)
 		tickCtx, cancelTick := context.WithTimeout(context.Background(), 10*time.Minute)
 		err := job.Tick(tickCtx)
@@ -288,12 +289,13 @@ func main() {
 	}()
 
 	maintenance := rollup.New(db.Pool(), rollup.Options{
-		OnTime:        cfg.OnTime,
-		RetentionDays: cfg.Maintain.RetentionDays,
-		LookaheadDays: cfg.Maintain.PartitionLookahead,
-		Interval:      cfg.Maintain.Interval,
-		Settle:        rollupSettle,
-		ExpireFilter:  func(before time.Time) { pipeline.ExpireFilterBefore(before) },
+		OnTime:             cfg.OnTime,
+		RetentionDays:      cfg.Maintain.RetentionDays,
+		VisitRetentionDays: cfg.Maintain.VisitRetentionDays,
+		LookaheadDays:      cfg.Maintain.PartitionLookahead,
+		Interval:           cfg.Maintain.Interval,
+		Settle:             rollupSettle,
+		ExpireFilter:       func(before time.Time) { pipeline.ExpireFilterBefore(before) },
 	}, time.Now, log)
 	background.Add(1)
 	go func() {
