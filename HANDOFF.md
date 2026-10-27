@@ -110,10 +110,11 @@ either means editing both `.env` files, then `$C up -d` on the VM.
 
 ## Due next
 
-1. **Disk: 86 % used, 2.8 GB free** (2026-10-27). The database is 6 of the
-   16 GB used; find the rest with `docker system df` on the VM (likely old
-   images and build cache) and clear it before `stop_visits` grows by ~2.4 GB
-   over 180 days (§16 q13, `docs/storage.md`). Storage itself is measured and
+1. **Disk: 86 % used, 2.8 GB free** (2026-10-27): 3.58 GB of it is Docker
+   build cache. Clear it with `docker builder prune -af` on the VM (volumes
+   untouched) if not already done, then check `df -h /`; `deploy/release.sh`
+   prunes cache older than a week from now on. `stop_visits` grows by
+   ~2.4 GB over 180 days (§16 q13, `docs/storage.md`). Storage itself is measured and
    the Stage 3 box ticked. After a month, re-measure `stop_visits`,
    `trip_services` and `service_alerts` (§16 q13, q14).
 2. **Ride-check the numbers**: take two or three trains you know, and compare

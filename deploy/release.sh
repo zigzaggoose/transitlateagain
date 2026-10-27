@@ -32,6 +32,10 @@ until curl -sf -o /dev/null http://127.0.0.1:8081/v1/admin/stats; do
 done
 echo "== up at $(git log --oneline -1)"
 
+# Each --build leaves its layers behind: 3.6 GB of 20 GB after a month of
+# deploys (docs/storage.md). A week of cache keeps the next build quick.
+docker builder prune -af --filter until=168h
+
 # --- One-off steps for this release (2026-10-27) ---
 echo "== backfill stop_visits"
 $C exec -T postgres psql -U headway -v ON_ERROR_STOP=1 -f - < deploy/backfill-stop-visits.sql

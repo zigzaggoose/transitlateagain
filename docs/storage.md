@@ -59,8 +59,11 @@ delta measured on its own. Against ~525 MB of raw rows a day, the rollups keep
   stored timetable versions, 212 MB per trains version when measured in
   September. Not measured directly.
 - Disk: **16 GB of 20 GB used, 2.8 GB free (86 %)**. The database is 6 GB of
-  that 16 GB; the rest is not measured yet, most likely Docker images and
-  build cache from each `up --build`. That is already past the 15 % free of
+  that 16 GB. `docker system df` the same evening: build cache 3.63 GB (3.58
+  reclaimable, 81 entries from a month of `up --build`), images 1.48 GB
+  (117 MB reclaimable), the database volume 6.65 GB; the OS and the 2 GB
+  swapfile make up the rest. `deploy/release.sh` now prunes build cache older
+  than a week after each deploy. That is already past the 15 % free of
   `TransitLateAgainDiskLow` (§10.4), and `stop_visits` growing by ~2.4 GB over
   its first 180 days would nearly fill what is left. See §16 q13.
 
