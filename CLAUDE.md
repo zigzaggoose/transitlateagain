@@ -83,8 +83,14 @@ cmd/fixturedump/       records testdata fixtures. The only thing that calls the 
 embed.go               //go:embed migrations/*.sql. No logic.
 internal/config/       env → validated Config. Fails fast. Never read after startup.
 internal/feed/         HTTP client, token-bucket limiter, one poller per feed.
-internal/gtfsrt/       protobuf → RawUpdate. EVERY nil check in the codebase lives here.
+internal/gtfsrt/       protobuf → RawUpdate, Alert. EVERY nil check in the codebase lives here.
+internal/gtfsstatic/   timetable bundle → versioned tables; read back into a match.Schedule.
+internal/servicetime/  service dates and seconds past midnight. DST lives here.
+internal/match/        RawUpdate → Observation against the in-memory timetable.
 internal/ingest/       Observation, change filter, bounded channel, batch writer.
+internal/cache/        latest-state cache behind /now.
+internal/rollup/       hourly rollup, stop_visits, partitions, retention.
+internal/api/          HTTP handlers. Reads; never writes.
 internal/metrics/      every §10.3 metric. Imports nothing from this module.
 internal/store/        pool, migrations, hand-written SQL. No ORM.
 migrations/            NNNN_name.sql, applied in order, checksummed.
@@ -180,8 +186,9 @@ New code lands with tests in the same commit.
 - Do not add an ORM, a router, a logging library, Kafka/NATS, Kubernetes, or
   Terraform. §2 rejects them by name.
 - Do not build anything in §2 Non-goals — trip planning, map rendering, auth,
-  prediction, service alerts, non-NSW agencies. A request for one is a change to
-  `PROJECT.md` first, not a branch.
+  prediction, push notifications, non-NSW agencies. A request for one is a
+  change to `PROJECT.md` first, not a branch: service alerts came in that way,
+  by amending §2 on 2026-10-27.
 - Do not hard-code `route_id` or `stop_id` values outside tests. Real ids come from
   the TfNSW bundle, and the examples in §7 are illustrative.
 - Do not call `GetX()` on a generated protobuf struct outside `internal/gtfsrt`.

@@ -2,7 +2,7 @@
 
 Single source of truth for this repository. Claude re-reads this file at the start of every session and has no other memory of the project. Everything needed to write code here is in this file or reachable from it.
 
-Last revised: 2026-09-21.
+Last revised: 2026-10-27.
 
 ---
 
@@ -143,29 +143,40 @@ Versions are pinned. Where a version is stated below it was checked against the 
                   │  PostgreSQL                          │              │
                   │   schedule_versions, routes, trips,  │              │
                   │   stops, stop_times, calendar*       │              │
+                  │   trip_services   (loader, 0007)     │              │
                   │   observations  (RANGE by day)       │              │
                   │   otp_stop_hourly, otp_route_hourly  │              │
+                  │   stop_visits   (RANGE by month)     │              │
+                  │   service_alerts  (alerts poller)    │              │
                   └───────┬──────────────────────┬───────┘              │
                           │                      ▲                      │
                           │                      │                      │
                           │           ┌──────────┴───────────┐          │
                           │           │ (9) maintenance job  │          │
-                          │           │  rollup → retention  │          │
+                          │           │  rollup + stop_visits│          │
+                          │           │  → retention         │          │
                           │           │  → partition precreate│         │
                           │           └──────────────────────┘          │
                           │                                             │
                           ▼                                             ▼
                   ┌──────────────────────────────────────────────────────────┐
                   │ (10) HTTP API                                            │
+                  │   /v1/lines               ← schedule cache               │
                   │   /v1/lines/{id}/now      ← latest-state cache           │
                   │   /v1/stops/{id}/now      ← latest-state cache           │
                   │   /v1/stops/{id}/history  ← otp_stop_hourly              │
                   │   /v1/lines/{id}/history  ← otp_route_hourly             │
-                  │   /healthz /readyz /metrics                              │
+                  │   /v1/trips/{id}          ← observations                 │
+                  │   /v1/stations            ← stops                        │
+                  │   /v1/services            ← schedule cache (legs),       │
+                  │                    stop_visits, service_alerts           │
+                  │   /healthz /readyz; /v1/admin/stats /metrics on admin    │
                   └──────────────────────────────────────────────────────────┘
 ```
 
 Everything above runs in **one process** (`cmd/transitlateagain`). The numbers are package boundaries, not deployment units.
+
+Not drawn, beside (2): one more poller fetches TfNSW's service alerts every `ALERTS_POLL_INTERVAL`; its handler in `main` decodes them (`gtfsrt.DecodeAlerts`) and upserts `service_alerts` with a deadline (`store.UpsertAlerts`). It shares the client, the limiter and the pollers' shutdown step, and does not touch the ingest channel (§15 2026-10-27).
 
 ### 4.2 Components
 
@@ -176,6 +187,7 @@ Everything above runs in **one process** (`cmd/transitlateagain`). The numbers a
 - Outputs: a `schedule_versions` row with `active = true`, plus rows in `routes`, `trips`, `stops`, `stop_times`, `calendar`, `calendar_dates` carrying that `version_id`. Returns `(versionID int64, changed bool, err error)`.
 - Must not know about: realtime, delays, the HTTP API, the observation schema.
 - Runs at startup and then daily on a timer.
+- In the same load transaction, names each new trip id by its service in `trip_services` (migrations/0007); a trip id already named keeps its key.
 
 **(2) Poller — `internal/feed`**
 
@@ -183,12 +195,14 @@ Everything above runs in **one process** (`cmd/transitlateagain`). The numbers a
 - Inputs: a `config.Feed`, the shared `Client` and `Limiter`, a `Handler`, a `context.Context`.
 - Outputs: calls `Handler(ctx, Response{FeedID string, Body []byte, FetchedAt time.Time, StatusCode int})` on its own goroutine, and does not start the next fetch until it returns. Not a channel — see the Decision Log, and §9.4, which puts decode and match on this goroutine anyway.
 - Must not know about: protobuf, GTFS semantics, Postgres. It is an HTTP client with a clock.
+- The same type polls the service alerts (`ALERTS_URL`), with its own interval and handler.
 
 **(3) Decoder / normaliser — `internal/gtfsrt`**
 
 - Single responsibility: `[]byte` → `[]RawUpdate`, with every field-presence check done here so no other package calls `GetX()` on a possibly-nil pointer.
 - Inputs: `FeedResponse`.
 - Outputs: `DecodedFeed{FeedID string, HeaderTimestamp time.Time, Updates []RawUpdate, Dropped int}`.
+- Also `DecodeAlerts` → `AlertFeed{HeaderTS, Alerts []Alert}`: English text, active periods, informed route, stop and trip ids, raw cause and effect.
 - Must not know about: the schedule, the database, what "late" means.
 
 **(4) Matcher — `internal/match`**
@@ -218,7 +232,7 @@ Everything above runs in **one process** (`cmd/transitlateagain`). The numbers a
 
 - Single responsibility: hold the active schedule version in memory so the matcher does not hit Postgres per update.
 - Inputs: a `version_id`; loads from Postgres.
-- Outputs: lookups by `(trip_id)` → trip + ordered stop-times; `(route_id)` → trip ids.
+- Outputs: lookups by `(trip_id)` → trip + ordered stop-times; `(route_id)` → trip ids; `Legs(from, to)` → every trip calling at one station and later at another, for `/v1/services` (stops carry their parent station).
 - Swapped atomically behind an `atomic.Pointer[Schedule]` when a new version is loaded. Readers never block.
 - Must not know about: how schedule versions get into the database.
 
@@ -233,14 +247,14 @@ Everything above runs in **one process** (`cmd/transitlateagain`). The numbers a
 **(9) Maintenance job — `internal/rollup`**
 
 - Single responsibility: keep the database small and historical queries fast.
-- Three ordered steps on each run: roll up completed hours; drop partitions older than retention; pre-create partitions for the next `PARTITION_LOOKAHEAD_DAYS` days.
+- Three ordered steps on each run: roll up completed hours, writing each visit's final observation to `stop_visits` in the same transaction; drop partitions older than retention (daily `observations` past `RETENTION_DAYS`, monthly `stop_visits` past `VISIT_RETENTION_DAYS`); pre-create partitions for the next `PARTITION_LOOKAHEAD_DAYS` days and the next month.
 - Inputs: a `*pgxpool.Pool`, a clock.
-- Outputs: rows in `otp_stop_hourly` / `otp_route_hourly`, `DROP TABLE` / `CREATE TABLE` DDL, a watermark in `rollup_state`.
+- Outputs: rows in `otp_stop_hourly` / `otp_route_hourly` / `stop_visits`, `DROP TABLE` / `CREATE TABLE` DDL, a watermark in `rollup_state`.
 - Must not know about: feeds, HTTP, matching. Order matters: never drop a partition that has not been rolled up.
 
 **(10) HTTP API — `internal/api`**
 
-- Single responsibility: map HTTP requests onto the cache and the rollup tables.
+- Single responsibility: map HTTP requests onto the caches, the rollup tables, and `stop_visits` with `service_alerts`.
 - Inputs: `*http.Request`.
 - Outputs: JSON.
 - Must not know about: pollers, the writer, protobuf. It reads; it never writes.
@@ -287,7 +301,9 @@ transitlateagain/
 │   ├── gtfsrt/
 │   │   ├── decode.go                 proto.Unmarshal → []RawUpdate. All nil checks live here.
 │   │   ├── types.go                  RawUpdate, DecodedFeed, schedule-relationship constants.
-│   │   └── decode_test.go            Runs against testdata/*.pb fixtures.
+│   │   ├── alerts.go                 Service alerts → []Alert. Their nil checks live here too.
+│   │   ├── decode_test.go            Runs against testdata/*.pb fixtures.
+│   │   └── alerts_test.go
 │   ├── gtfsstatic/
 │   │   ├── load.go                   Download, hash, one-transaction insert, activate, prune.
 │   │   ├── parse.go                  Streaming zip CSV → COPY, by column name, BOM-tolerant, line-numbered errors.
@@ -300,9 +316,10 @@ transitlateagain/
 │   │   ├── servicetime.go            GTFS "HH:MM:SS" (HH may exceed 23) ↔ seconds; service day maths.
 │   │   └── servicetime_test.go       DST cases are the whole point of this package.
 │   ├── match/
-│   │   ├── schedule.go               In-memory timetable; calendar logic (RunsOn).
+│   │   ├── schedule.go               In-memory timetable; calendar logic (RunsOn); Legs between two stations.
 │   │   ├── matcher.go                RawUpdate → Observation: orders 1–4, service date, delay derivation, atomic swap.
-│   │   └── matcher_test.go
+│   │   ├── matcher_test.go
+│   │   └── schedule_test.go
 │   ├── ingest/
 │   │   ├── observation.go            The Observation type and its key.
 │   │   ├── filter.go                 Change filter (5).
@@ -316,24 +333,29 @@ transitlateagain/
 │   │   └── latest_test.go
 │   ├── store/
 │   │   ├── store.go                  Pool construction, ping, retries.
-│   │   ├── observations.go           Batch upsert, per-trip reads.
-│   │   ├── schedule.go               Reads/writes for the static tables.
-│   │   ├── rollup.go                 Rollup and retention SQL.
+│   │   ├── history.go                Stop and route history from the rollups.
+│   │   ├── trip.go                   One trip's last observation per stop.
+│   │   ├── services.go               Stations; each leg's service and its days at the destination.
+│   │   ├── alerts.go                 Upsert of the service alerts.
+│   │   ├── maintenance.go            Partition, watermark and size state for /v1/admin/stats.
 │   │   ├── migrate.go                Embedded migration runner. No external tool.
 │   │   ├── migrate_test.go           Loader rules, retry policy, secret redaction. No database needed.
-│   │   └── store_integration_test.go Tagged `//go:build integration`. Schema per test.
+│   │   └── *_integration_test.go     Tagged `//go:build integration`. Schema per test.
 │   ├── rollup/
 │   │   ├── job.go                    Ordered maintenance run (9): partitions, retention, filter expiry.
 │   │   ├── rollup.go                 The hourly rollup and its watermark.
 │   │   └── job_integration_test.go   Tagged. Every guard in §9.3 against a real Postgres.
 │   ├── api/
 │   │   ├── router.go                 ServeMux patterns. One place that knows about paths.
-│   │   ├── handlers_now.go
+│   │   ├── handlers_now.go           /v1/lines, /v1/lines/{id}/now, /v1/stops/{id}/now.
 │   │   ├── handlers_history.go
+│   │   ├── handlers_trip.go          /v1/trips/{trip_id}.
+│   │   ├── handlers_services.go      /v1/stations, /v1/services.
 │   │   ├── handlers_meta.go          /healthz, /readyz, /v1/admin/stats.
 │   │   ├── render.go                 writeJSON, writeError. Single error envelope.
 │   │   ├── middleware.go             Request id, access log, panic recovery, timeout.
-│   │   └── api_test.go               httptest against a fake store.
+│   │   ├── ratelimit.go              Per-client token bucket (§15 2026-09-24).
+│   │   └── *_test.go                 httptest against fake store functions.
 │   └── metrics/
 │       └── metrics.go                Every §10.3 metric, on the default registry. Imports nothing from this module.
 │
@@ -357,12 +379,16 @@ transitlateagain/
 │   ├── sydneytrains_added.pb               Hand-trimmed: an ADDED trip with no schedule.
 │   ├── sydneytrains_pastmidnight.pb        A trip whose stop times exceed 24:00:00.
 │   ├── malformed_truncated.pb              First 200 bytes of a valid feed.
-│   └── gtfs_mini.zip                       10 trips, 40 stop_times, 2 routes, hand-built.
+│   └── alerts_all.pb                       Five live service alerts, one of each informed shape.
 │
 ├── deploy/
 │   ├── Dockerfile                    Multi-stage, CGO_ENABLED=0, cross-compiled to TARGETARCH (amd64 on the VM), distroless.
 │   ├── docker-compose.yml            postgres + transitlateagain. Volumes, healthchecks, restart policy.
 │   ├── docker-compose.override.yml   Local only: port mapping, hot env.
+│   ├── docker-compose.vm.yml         The VM only: 443, the origin certificate, CF-Connecting-IP, Alloy.
+│   ├── alloy.config, grafana-dashboard.json   Metrics to Grafana Cloud (§15 2026-09-24).
+│   ├── firewall.sh                   Cloudflare's ranges only, in DOCKER-USER.
+│   ├── release.sh                    From the laptop: deploy, wait, one-off steps, storage figures.
 │   ├── backfill-stop-visits.sql      One-off after migrations/0007, run beside the live service.
 │   └── vm-bootstrap.md               Exact commands run on a fresh BinaryLane VM. Keep current.
 │
@@ -371,7 +397,7 @@ transitlateagain/
 │   ├── storage.md                    Measured bytes/day before and after rollups.
 │   └── runbook.md                    What to do when each alert fires.
 │
-├── web/                              Next.js static export on Cloudflare Pages (§15): app/page.tsx, chart.tsx, api.ts.
+├── web/                              Next.js static export on Cloudflare Pages (§15): app/page.tsx (live), app/services/page.tsx (report cards), api.ts, lines.ts, services.ts.
 │   └── (Next.js app)
 │
 └── .github/
@@ -632,7 +658,9 @@ ON CONFLICT DO NOTHING;
 `migrations/0007_stop_visits.sql` adds two tables for per-service history; the file carries the DDL and its reasoning, and is authoritative:
 
 - **`trip_services`** `(feed_id, trip_id) → route_id, direction_id, origin_stop_id, origin_dep_s, headsign, first_version_id`. A *service* is `(feed_id, route_id, direction_id, origin_stop_id, origin_dep_s)`, the departure rounded to the minute: "the 07:42 from Hornsby", which keeps its key across timetable versions where trip ids do not. `origin_stop_id` is the parent station when there is one. Filled by the schedule loader inside the load transaction, `ON CONFLICT DO NOTHING`, and never pruned with its version.
-- **`stop_visits`** `(feed_id, trip_id, stop_id, service_date)` → `scheduled_at, observed_delay_s, trip_rel, stop_time_rel`, partitioned **by month**. One row per visit, the same final observation the rollup counts, written by the rollup in the same transaction. Kept for `VISIT_RETENTION_DAYS`, so service history outlives raw retention and the hourly rollups can be rebuilt after a bug fix.
+- **`stop_visits`** `(feed_id, trip_id, stop_id, service_date)` → `scheduled_at, observed_delay_s, trip_rel, stop_time_rel`, partitioned **by month**. One row per visit, the same final observation the rollup counts, written by the rollup in the same transaction. Kept for `VISIT_RETENTION_DAYS`, so service history outlives raw retention and the hourly rollups can be rebuilt after a bug fix. Visits closed before the migration are backfilled by `deploy/backfill-stop-visits.sql`, beside the running service.
+
+`migrations/0008_service_alerts.sql` adds **`service_alerts`** `(alert_id)` → `first_seen_ts, last_seen_ts` (feed header timestamps), raw `cause` and `effect`, `header, description, url`, `active tstzmultirange` (no period means `{(,)}`, always), and `route_ids, stop_ids, trip_ids text[]`, with a GiST index on `active`. Each poll upserts it; an older body never overwrites a newer one. Not pruned (§16 q14).
 
 ### 6.3 Rollup query shape
 
@@ -1311,7 +1339,7 @@ There is a second, related trap: the generated bindings in `github.com/MobilityD
 1. **Change filter (the big win).** Keep `map[Key]lastValue` in memory where `Key` is `(service_date, feed_id, trip_id, stop_sequence)` and `lastValue` is `(observed_delay_s, stop_time_rel, trip_rel)`. Admit an observation only when the value differs, or differs by more than `FILTER_MIN_DELTA_S`. A vehicle running exactly to schedule produces one row per stop per day instead of one per stop per poll. Expect this to remove the large majority of candidate rows; the `transitlateagain_filtered_total` / `transitlateagain_admitted_total` ratio is the number to quote.
 2. **Daily range partitioning.** `observations` is partitioned by `service_date`. Retention is `DROP TABLE`, which is instant and reclaims space immediately. `DELETE` on a large table does not return space to the filesystem without a `VACUUM FULL`, which needs a full second copy of the table — impossible on a tight disk.
 3. **Hourly rollups.** `otp_stop_hourly` and `otp_route_hourly` are computed from completed hours and are the only thing the history endpoints read. They are small — bounded by stops × routes × hours — and are never dropped.
-4. **Retention.** Drop partitions with `service_date < today − RETENTION_DAYS`, and only if `rollup_state.watermark` is past the end of that service date.
+4. **Retention.** Drop partitions with `service_date < today − RETENTION_DAYS`, and only if `rollup_state.watermark` is past the end of that service date. `stop_visits` (migrations/0007) is the same at a month's grain: a month is dropped once it ends `VISIT_RETENTION_DAYS` ago and the watermark is two days past its end, the 48 h a service day's times can run on.
 
 **Approaches rejected.**
 
