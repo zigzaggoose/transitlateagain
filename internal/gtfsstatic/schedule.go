@@ -49,13 +49,16 @@ func (l *Loader) Schedule(ctx context.Context, feedID string) (*match.Schedule, 
 			return fmt.Errorf("routes: %w", err)
 		}
 
-		if err := each(ctx, tx, `SELECT stop_id, name FROM stops WHERE version_id = $1`,
+		if err := each(ctx, tx, `SELECT stop_id, name, coalesce(parent_station, '') FROM stops WHERE version_id = $1`,
 			version, func(r pgx.Rows) error {
-				var id, name string
-				if err := r.Scan(&id, &name); err != nil {
+				var id, name, parent string
+				if err := r.Scan(&id, &name, &parent); err != nil {
 					return err
 				}
 				sched.AddStop(id, name)
+				if parent != "" {
+					sched.SetParent(id, parent)
+				}
 				return nil
 			}); err != nil {
 			return fmt.Errorf("stops: %w", err)

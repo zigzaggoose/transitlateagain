@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { API, get, type History, type Line, type Now } from "./api";
 import { StatusPie } from "./chart";
@@ -139,6 +140,9 @@ export default function Page() {
           <p className="muted">
             Live running and on-time history for Sydney&apos;s trains, metro, ferries and light rail, measured from
             Transport for NSW&apos;s realtime feeds.
+          </p>
+          <p>
+            <Link href="/services">Is my train usually late? Report cards for every train between two stations →</Link>
           </p>
         </header>
 

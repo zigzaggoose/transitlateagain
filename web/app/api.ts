@@ -95,3 +95,41 @@ export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   }
   return body as T;
 }
+
+export type Station = { stop_id: string; name: string; feed_id: string };
+
+export type DayType = "weekday" | "saturday" | "sunday";
+
+export type ServiceDay = { service_date: string; delay_s: number | null; status: Status };
+
+// One scheduled service from the From station to the To station: "the 07:42".
+export type Service = {
+  feed_id: string;
+  route_id: string;
+  short_name?: string;
+  direction_id: number | null;
+  headsign?: string;
+  origin: { stop_id: string; name?: string };
+  origin_departs: string;
+  departs: string;
+  arrives: string;
+  n_days: number;
+  n_early: number;
+  n_on_time: number;
+  n_late: number;
+  n_very_late: number;
+  n_cancelled: number;
+  n_skipped: number;
+  n_unknown: number;
+  typical_delay_s: number | null;
+  days: ServiceDay[];
+};
+
+export type Services = {
+  from: { stop_id: string; name?: string };
+  to: { stop_id: string; name?: string };
+  day_type: DayType;
+  first_day: string;
+  last_day: string;
+  services: Service[];
+};

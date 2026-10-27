@@ -35,7 +35,7 @@ v1 is done when all ten hold at the same time. Stage 4 items (Grafana, Next.js) 
 
 Scope creep is the main risk on this project. Transit Late Again does **not** do any of the following, and a request to add one of them is a change to this file first, not a branch.
 
-- **No trip planning, routing or journey search.** No shortest path, no transfers, no fare calculation. TfNSW already has a Trip Planner API for that.
+- **No trip planning, routing or journey search.** No shortest path, no transfers, no fare calculation. TfNSW already has a Trip Planner API for that. *Amended 2026-10-27 (§15):* listing the **direct** services between two stations, with how each has run, is in scope (`GET /v1/services`): it is history about trains that exist in the timetable, not a search for a way to travel. Anything needing a change of train stays out.
 - **No map rendering, no shape/geometry storage.** `shapes.txt` is skipped at load time. Stop coordinates are stored only so the API can return them; nothing draws a line on a map.
 - **No user accounts, authentication, sessions or multi-tenancy.** The HTTP API is public and read-only. There are no writes over HTTP.
 - **No push notifications, alerting to end users, email, or SMS.**
@@ -861,6 +861,39 @@ Query params: `service_date` (required, `YYYY-MM-DD`, as `/now` reports it).
 ```
 
 `status` is as for `/now`, plus `skipped` (the feed marked the stop `SKIPPED`) and `unknown` for a stop the feed never mentioned. `passed` is the predicted time, or the scheduled time without a delay, before now. `404 trip_not_found` if no loaded timetable has the trip; `400 invalid_parameter` without a valid `service_date`.
+
+#### `GET /v1/stations`
+
+Every station of every active timetable — a parent station, or a stop with none — for the site's From and To pickers. `Cache-Control: public, max-age=3600`.
+
+```json
+{ "stations": [ { "stop_id": "207720", "name": "Hornsby Station", "feed_id": "sydneytrains" } ], "count": 1 }
+```
+
+The same `stop_id` appears once per feed that lists it (Central is in trains and metro).
+
+#### `GET /v1/services`
+
+The report card for every **direct** service from one station to another (§2 as amended): each service the active timetables run from `from` and later to `to`, with its arrival delay at `to` on each past day it ran. A service is `migrations/0007`'s key — route, direction, origin station, origin departure to the minute — so the days come from every trip id it has had, not only today's. A station includes its platforms. Services with no day in the range are left out: not running on those days of the week, or no history yet. `Cache-Control: public, max-age=300`.
+
+Query params: `from`, `to` (required, different stop ids; `404 stop_not_found` when not in the active timetable), `day_type` (`weekday` default, `saturday`, `sunday`, `all`), `days` (1 to `HISTORY_MAX_DAYS`, default 28, counted back from today's service date).
+
+```json
+{
+  "from": { "stop_id": "207720", "name": "Hornsby Station" }, "to": { "stop_id": "200060", "name": "Central Station" },
+  "day_type": "weekday", "first_day": "2026-09-30", "last_day": "2026-10-27",
+  "services": [
+    { "feed_id": "sydneytrains", "route_id": "NSN_2k", "short_name": "T1", "direction_id": 1, "headsign": "Penrith via Parramatta",
+      "origin": { "stop_id": "207720", "name": "Hornsby Station" }, "origin_departs": "21:42", "departs": "21:42", "arrives": "22:32",
+      "n_days": 17, "n_early": 0, "n_on_time": 11, "n_late": 6, "n_very_late": 0, "n_cancelled": 0, "n_skipped": 0, "n_unknown": 0,
+      "typical_delay_s": 190,
+      "days": [ { "service_date": "2026-09-30", "delay_s": 40, "status": "on_time" } ] }
+  ],
+  "count": 1
+}
+```
+
+Times are the rider's clock (`HH:MM`; a past-midnight `25:10` is `01:10`); services are in order of scheduled departure from `from`. Statuses use the §8 thresholds as `/now` does, plus `skipped` and `unknown` (no delay reported). `typical_delay_s` is the median over days with a delay, excluding cancelled and skipped ones. The site's grade and wording (`web/app/services.ts`) are presentation and not part of this contract.
 
 #### `GET /v1/admin/stats`
 
@@ -1820,6 +1853,7 @@ Append-only. To reverse a decision, add a row that names the one it supersedes.
 | 2026-09-25 | The site puts the history pie on the left and the live list on the right (stacked below 900 px). The live summary counts are toggle filters, a search box narrows trains to those whose start, end or next stop contains every word typed, the list scrolls in a box capped at 65 % of the window height, and a **Full screen** button (Esc leaves) lays the live section over the whole window with the list uncapped. | Asked for by the user: with 30 light-rail trips the list filled several screens and pushed the chart out of sight; side by side, the summary stays in view while a train is opened. | The browser Fullscreen API: iPhone Safari allows it only for video, while a fixed-position overlay works everywhere with the same state. Separate filter chips: the summary counts already name each status and how many trains it leaves. Searching by time or trip id: riders look for stations. |
 | 2026-09-26 | The latest-state cache drops **ghost trips**: unmatched observations whose `trip_rel` is `SCHEDULED` (0) or `REPLACEMENT` (5). They are still stored. Refines §9.1 case 18, which kept every unmatched trip. | At 20:15 on Saturday 2026-09-26, 82 of 299 train trips on `/now` read "To an unknown stop". Every one was `817.160.64.*`, a Friday-only service dated 2026-09-25 with stop times 24:47–26:33, finished 18 hours earlier; TfNSW's feed still sent them with fresh timestamps. The bundle published at 01:01 that morning had rightly dropped timetable 817, so they could not match, and without a scheduled time case 18 kept them indefinitely. A trip that claims a timetable slot the timetable lacks is by that claim not a real service today. | Refreshing the schedule hourly (tried first, reverted before commit: the trips were not missing from a stale bundle, and loading the 01:01 bundle before the previous day's post-midnight trains finish would unmatch trains still running); matching against the previous version as well (~115 MB more on a 1 GB VM); relabelling them on the site (keeps 82 false trains in the list and the counts). Cost accepted: a real train TfNSW runs as `SCHEDULED` but leaves out of its bundle disappears from `/now`; on 2026-09-23 the bundle held 301 of 309 live trip ids, and 10 of the 19 absent updates were `ADDED`. |
 | 2026-10-27 | Per-service history: `migrations/0007` adds `trip_services` (a trip id's service key, filled by the schedule loader) and `stop_visits` (each visit's final observation, written by the rollup, monthly partitions, `VISIT_RETENTION_DAYS=180`). The migration backfills `trip_services` from the stored timetables; `deploy/backfill-stop-visits.sql` backfills `stop_visits` by hand beside the running service, because a migration runs before the pollers start and a sort of every raw row would stop ingest for minutes. Asked for by the user as step 3 of a plan to make the site a report card per scheduled service. | Hourly per-stop rollups cannot say how "the 07:42" does, and raw rows go after `RETENTION_DAYS`, so per-service history needs its own durable table; it also lets the rollups be rebuilt, where until now a rollup bug would corrupt history for good. Keyed by service, not trip id, because measured across the two stored train bundles (2026-09-23, 2026-09-24): 92 % of trip ids carried over but 99.9 % of service keys did (11,532 of 11,544), and no shared trip id changed its key (0 of 61,246). Parent station, not platform: keyed by platform the same services split from 11,544 to 12,008. The rollup already computes the final word per visit, so writing it there costs one INSERT and no new scan. Monthly partitions: a year is 12 tables; retention stays `DROP TABLE` (§9.3). | Keeping raw observations longer (266 bytes a row, several rows a visit, ~4 GB a week); a per-trip rollup (loses the per-stop delay a service page needs between two stops); the service key on `observations`, set by the matcher (a column on the hottest table, and changes to matcher, writer and filter for a value that is a function of the trip id); joining the timetable at rollup or query time (the version that named a trip id may be pruned); daily partitions (365 tables a year); no default partition (a stray date would fail the whole rollup transaction and stop history). |
+| 2026-10-27 | A service report card: `GET /v1/stations` and `GET /v1/services?from=&to=&day_type=&days=` (§7), and `web/app/services/` (`/services`, linked from the live page): each direct train between two stations with a grade (A–F on the share of days arriving at most 5 min late, early counting as on time, cancelled and skipped against; none below 5 days), a sentence ("Late 6 of the last 17 weekdays, usually 3 min late") and a square per day. §2 is amended to allow it. The legs are found in Go over the in-memory timetable (`match.Schedule.Legs`, which now holds each stop's parent station); Postgres only maps their trip ids to services and reads `stop_visits`. Asked for by the user as step 4. Found by running it: the service key rounds the origin departure to the minute (`NSN_2k` from Hornsby at 21:42:00 and 21:42:01 was one train as two cards), the headsign is the most common of the service's trips, not the first alphabetically, and RTTA empty-train runs are hidden as on the live page. | A commuter decides between departures, not lines; hourly per-stop rollups cannot say how one departure does. Measured on the laptop with 1.7M synthetic visits (28 days of the trains timetable, 209 bytes a row): doing the leg search in SQL took 5.7 s for Hornsby to Central as the planner chose it, 335 ms with each end's calls materialised, and still read 48,668 calls at Central from the heap; in Go it is 35–39 ms, and the SQL that remains is 180 ms (Hornsby to Central, 454 services) to 325 ms (Strathfield to Central, the busiest pair, 11,695 legs), 0.34–0.50 s end to end with 0.4–0.9 MB of JSON. Cloudflare holds each answer 5 minutes. A stop-before-date key order was measured 1.3–1.5× faster than date-before-stop, and an array in place of an `IN (SELECT …)` semi-join cut a third. | Per-route service lists (a commuter between Hornsby and Central takes T1, T9 or CCN alike); a stop search endpoint (a list of ~2,800 stations is 36 kB, cached an hour); a covering index on `stop_times` (~110 MB per timetable version on a 1 GB VM); a per-stop trip index in memory (~20 MB); arrival or departure at the boarding stop as the measure (a rider is late when they arrive late); TfNSW's official punctuality figures (§16 q2: this is Transit Late Again's measure, said on the page). |
 
 ---
 

@@ -48,6 +48,7 @@ type Schedule struct {
 	services map[string]*service
 	routes   map[string]Route
 	stops    map[string]string // stop_id → name
+	parents  map[string]string // stop_id → parent_station, for stops that have one
 	// Every stop_id string appears in thousands of stop times. Interning
 	// keeps one copy of each instead of one allocation per row; on the
 	// Sydney Trains bundle that is 1,215 strings instead of 1.24 million.
@@ -63,6 +64,7 @@ func NewSchedule(versionID int64, feedID string) *Schedule {
 		services:  make(map[string]*service),
 		routes:    make(map[string]Route),
 		stops:     make(map[string]string),
+		parents:   make(map[string]string),
 		stopIDs:   make(map[string]string),
 	}
 }
@@ -72,6 +74,70 @@ func (s *Schedule) AddRoute(routeID string, r Route) { s.routes[routeID] = r }
 
 // AddStop records a stop's name.
 func (s *Schedule) AddStop(stopID, name string) { s.stops[stopID] = name }
+
+// SetParent records that stopID is part of station parent, as a train
+// station's platforms are.
+func (s *Schedule) SetParent(stopID, parent string) { s.parents[stopID] = parent }
+
+// Leg is one trip's ride from one station to another: when it leaves the
+// first and reaches the second, in seconds into the service day.
+type Leg struct {
+	TripID           string
+	DepartS, ArriveS int32
+}
+
+// Legs returns every trip that calls at station from and later at station
+// to, where a station is a stop or any stop whose parent it is, and every
+// stop id that is part of to. A trip calling at from twice rides from the
+// first call.
+//
+// ponytail: a linear scan of every stop time, ~1.3M for all five feeds; the
+// timetable has no pickup or drop-off types in memory, so a call where
+// TfNSW forbids boarding counts as a leg. Index trips by stop when this
+// shows up in a profile, and load those types if a rider is ever misled.
+func (s *Schedule) Legs(from, to string) (legs []Leg, toStops []string) {
+	// Two small sets, so the scan does one lookup per call rather than a
+	// lookup in parents as well: 47 ms a search on the trains bundle before.
+	froms, tos := map[string]bool{}, map[string]bool{}
+	for id := range s.stops {
+		station := s.parents[id]
+		if id == from || station == from {
+			froms[id] = true
+		}
+		if id == to || station == to {
+			tos[id] = true
+			toStops = append(toStops, id)
+		}
+	}
+	if len(froms) == 0 || len(tos) == 0 {
+		return nil, nil
+	}
+	for id, t := range s.trips {
+		depart := NoTime
+		for _, st := range t.Stops {
+			if depart == NoTime {
+				if froms[st.StopID] {
+					depart = firstTime(st.DepS, st.ArrS)
+				}
+				continue
+			}
+			if tos[st.StopID] {
+				if arrive := firstTime(st.ArrS, st.DepS); arrive != NoTime {
+					legs = append(legs, Leg{TripID: id, DepartS: depart, ArriveS: arrive})
+				}
+				break
+			}
+		}
+	}
+	return legs, toStops
+}
+
+func firstTime(a, b int32) int32 {
+	if a != NoTime {
+		return a
+	}
+	return b
+}
 
 // Route returns a route by id.
 func (s *Schedule) Route(routeID string) (Route, bool) {

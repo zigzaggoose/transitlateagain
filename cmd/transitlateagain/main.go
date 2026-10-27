@@ -179,6 +179,8 @@ func main() {
 		Schedules:       matcher.Schedules,
 		History:         db.History,
 		TripStops:       db.TripStops,
+		Stations:        db.Stations,
+		Services:        db.Services,
 		HistoryMaxDays:  cfg.HTTP.HistoryMaxDays,
 		RateLimit:       cfg.HTTP.RateLimit,
 		ClientIPHeader:  cfg.HTTP.ClientIPHeader,

@@ -333,3 +333,119 @@ input[type="search"] {
 footer {
   margin-top: 48px;
 }
+
+/* Service report cards (app/services). */
+#from,
+#to {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font: inherit;
+  color: inherit;
+}
+
+.picker .controls {
+  margin-top: 16px;
+  align-items: center;
+}
+
+label.inline {
+  display: inline;
+  margin: 0 0 0 8px;
+  font-weight: normal;
+}
+
+label.inline input {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+
+.services {
+  padding: 0;
+  list-style: none;
+}
+
+.service {
+  display: grid;
+  grid-template-columns: 3rem 1fr;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.service > div:last-child {
+  min-width: 0; /* a grid item's auto minimum would let a long name widen the page */
+}
+
+.service p {
+  margin: 0 0 6px;
+}
+
+.service .when b {
+  font-size: 1.15rem;
+}
+
+.grade {
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  height: 3rem;
+  border-radius: 8px;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: var(--bg);
+}
+
+.g-A,
+.g-B { background: var(--good); }
+.g-C { background: var(--fair); }
+.g-D,
+.g-F { background: var(--poor); }
+.grade.none {
+  border: 1px dashed var(--line);
+  color: var(--muted);
+}
+
+/* One square a day; the status is also in each square's text, for screen
+   readers and anyone who cannot tell the colours apart. */
+.days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.days li {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--pie-on-time);
+}
+
+.days li.early { background: var(--pie-on-time); }
+.days li.late { background: var(--pie-late); }
+.days li.very_late,
+.days li.cancelled { background: var(--pie-cancelled); }
+.days li.skipped { background: var(--pie-cancelled); opacity: 0.6; }
+.days li.unknown {
+  background: none;
+  border: 1px solid var(--line);
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

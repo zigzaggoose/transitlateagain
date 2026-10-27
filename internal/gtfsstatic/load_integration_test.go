@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -496,7 +497,7 @@ func TestSchedule_ReadBack_RoundTripsTheActiveVersion(t *testing.T) {
 	h := newHarness(t, 3)
 	b := bundle(t, map[string]string{
 		"routes.txt":         "route_id,route_type\nAPS_1a,2\nAPS_1d,2\n",
-		"stops.txt":          "stop_id,stop_name\nA,Alpha\nB,Beta\n",
+		"stops.txt":          "stop_id,stop_name,location_type,parent_station\nA,Alpha,0,\nB,Beta,0,P\nP,Pi,1,\n",
 		"trips.txt":          "route_id,service_id,trip_id,direction_id,trip_headsign\nAPS_1a,SVC,T-1,1,Macarthur\n",
 		"stop_times.txt":     "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT-1,25:10:00,25:11:00,B,20\nT-1,,,A,3\n",
 		"calendar.txt":       "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nSVC,0,0,1,0,0,0,0,20260921,20261231\n",
@@ -530,6 +531,9 @@ func TestSchedule_ReadBack_RoundTripsTheActiveVersion(t *testing.T) {
 	}
 	if name, ok := s.Stop("B"); !ok || name != "Beta" {
 		t.Errorf("stop B = %q, found %v", name, ok)
+	}
+	if _, to := s.Legs("A", "P"); !slices.Equal(slices.Sorted(slices.Values(to)), []string{"B", "P"}) {
+		t.Errorf("station P = %v, want itself and its platform B: parent_station did not come back", to)
 	}
 	wed := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 	if !s.RunsOn("SVC", wed) || s.RunsOn("SVC", wed.AddDate(0, 0, 1)) || s.RunsOn("SVC", wed.AddDate(0, 0, 7)) {
